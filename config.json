@@ -1,0 +1,12 @@
+{
+    "grid_map": {
+        "enabled": false,
+        "spacing": 10,
+        "alignment_strength": 2.0
+    },
+    "display_options": {
+        "show_section_distance": true,
+        "show_tag_id": true,
+        "show_address_id": true
+    }
+}
