@@ -92,7 +92,6 @@ class MapPlotUI:
         self.errors = []
         self._create_widgets()
         self._layout_widgets()
-        self._update_button_states()  # 初始化按鈕狀態
         self._setup_logging()  # 設定日誌 (在 UI 元件建立之後，這樣才能正確顯示日誌)
         
         # 根據配置設定 UI 狀態
@@ -128,10 +127,10 @@ class MapPlotUI:
         self.cargo_map_plotter = CargoMapPlotter()
     def _create_widgets(self):
         """建立使用者介面元件"""
-        self._create_buttons()
+        # self._create_buttons()  # 移除
         self._create_checkbutton()
         self._create_status_frames()
-        
+
     def _create_status_frames(self):
         """建立警報與異常顯示區域"""
         # 建立框架容器
@@ -156,10 +155,24 @@ class MapPlotUI:
         # 設定唯讀狀態
         self.warning_text.config(state=tk.DISABLED)
         self.error_text.config(state=tk.DISABLED)
+        
+        # 建立畫布專用框架
+        self.canvas_frame = ttk.Frame(self.status_frame)
+
         # 新增畫布元件
-        self.output_canvas = tk.Canvas(self.status_frame, width=400, height=300, bg="white", scrollregion=(0, 0, 400, 300))
-        self.zoom_in_btn = tk.Button(self.status_frame, text="+", width=2, command=self._zoom_in)
-        self.zoom_out_btn = tk.Button(self.status_frame, text="-", width=2, command=self._zoom_out)
+        self.output_canvas = tk.Canvas(self.canvas_frame, width=400, height=300, bg="white", scrollregion=(0, 0, 400, 300))
+
+        # 新增垂直滾動條
+        self.canvas_v_scrollbar = ttk.Scrollbar(self.canvas_frame, orient=tk.VERTICAL, command=self.output_canvas.yview)
+        self.output_canvas.config(yscrollcommand=self.canvas_v_scrollbar.set)
+
+        # 新增水平滾動條
+        self.canvas_h_scrollbar = ttk.Scrollbar(self.canvas_frame, orient=tk.HORIZONTAL, command=self.output_canvas.xview)
+        self.output_canvas.config(xscrollcommand=self.canvas_h_scrollbar.set)
+
+        # 新增放大縮小按鈕
+        self.zoom_in_btn = tk.Button(self.canvas_frame, text="+", width=2, command=self._zoom_in)
+        self.zoom_out_btn = tk.Button(self.canvas_frame, text="-", width=2, command=self._zoom_out)
         self.output_canvas.bind("<Configure>", self._on_canvas_resize)
         self.output_canvas.bind("<ButtonPress-1>", self._start_move)
         self.output_canvas.bind("<B1-Motion>", self._move_canvas)
@@ -173,7 +186,7 @@ class MapPlotUI:
         ]
         for idx, (label, folder) in enumerate(floor_info):
             btn = tk.Button(
-                self.status_frame,
+                self.canvas_frame,
                 text=label,
                 width=4,
                 command=lambda f=folder: self.load_and_plot_vehicle_map(f)
@@ -203,20 +216,8 @@ class MapPlotUI:
     def _create_buttons(self):
         """建立按鈕"""
         self.buttons = {
-            'select_folder': tk.Button(
-                self.root, 
-                text="選擇資料夾", 
-                command=self.select_data_folder, 
-                width=15, 
-                height=2
-            ),
-            'vehicle_map': tk.Button(
-                self.root, 
-                text="繪製車輛地圖", 
-                command=self.plot_vehicle_map, 
-                width=15, 
-                height=2
-            ),
+            # 'select_folder': tk.Button(...),  # 已移除
+            # 'vehicle_map': tk.Button(...),    # 已移除
             'cargo_map': tk.Button(
                 self.root, 
                 text="繪製貨物地圖", 
@@ -242,7 +243,7 @@ class MapPlotUI:
             self.add_error(error_msg)
             messagebox.showerror("缺少檔案", error_msg)
             self.data_folder = None  # 確保清除無效的資料夾
-            self._update_button_states()  # 更新按鈕狀態
+            #self._update_button_states()  # 更新按鈕狀態
             return
         self.data_folder = folder_path
         logging.info(f"已選擇資料夾: {folder_path}")
@@ -284,7 +285,7 @@ class MapPlotUI:
                 self.cargo_map_plotter.save_path = map_files['save_path']
                 self.cargo_map_plotter.p_port = map_files['port']
                 self.cargo_map_plotter.p_shelf = map_files['shelf']
-                                
+                                                
                 logging.info(f"已選擇資料夾: {folder_path}")
                 messagebox.showinfo("成功", "已成功載入所有必要檔案並驗證欄位格式")
                 
@@ -297,10 +298,10 @@ class MapPlotUI:
                 self.add_error(error_msg)
                 messagebox.showerror("資料欄位錯誤", f"資料欄位驗證失敗: {str(ve)}")
                 self.data_folder = None
-                self._update_button_states()
+                #self._update_button_states()
                 return
             
-            self._update_button_states()  # 更新按鈕狀態
+            #self._update_button_states()  # 更新按鈕狀態
         
         except Exception as e:
             import traceback
@@ -311,7 +312,7 @@ class MapPlotUI:
             self.add_error(error_msg)
             messagebox.showerror("錯誤", f"載入資料時發生錯誤: {str(e)}")
             self.data_folder = None
-            self._update_button_states()
+            #self._update_button_states()
 
     def plot_vehicle_map(self):
         """繪製車輛地圖"""
@@ -457,31 +458,30 @@ class MapPlotUI:
     def _update_button_states(self):
         """更新按鈕啟用/停用狀態"""
         if self.data_folder:
-            # 如果已選擇有效資料夾，啟用繪圖按鈕
-            self.buttons['vehicle_map'].config(state=tk.NORMAL)
-            self.buttons['cargo_map'].config(state=tk.NORMAL)        
+            # 只控制 cargo_map 按鈕
+            self.buttons['cargo_map'].config(state=tk.NORMAL)
         else:
-            # 如果未選擇有效資料夾，停用繪圖按鈕
-            self.buttons['vehicle_map'].config(state=tk.DISABLED)
             self.buttons['cargo_map'].config(state=tk.DISABLED)
 
     def _layout_widgets(self):
         """佈局使用者介面元件"""
-        # 按鈕區域
-        for key, button in self.buttons.items():
-            if key != 'cargo_map':  # 隱藏貨物地圖按鈕
-                button.pack(pady=5)
-        
-        # 狀態區域（已隱藏）
+        # 按鈕區域移除
+        # for key, button in self.buttons.items():
+        #     button.pack(pady=5)
+
         self.status_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-        self.error_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.error_frame.pack(fill=tk.X, padx=5, pady=5)
         self.error_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.error_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.error_text.config(height=7)  # 固定高度
 
-        # 在異常資訊下方新增畫布
-        self.output_canvas.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        self.canvas_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        self.output_canvas.grid(row=0, column=0, sticky="nsew")
+        self.canvas_v_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.canvas_h_scrollbar.grid(row=1, column=0, sticky="ew")
+        self.canvas_frame.rowconfigure(0, weight=1)
+        self.canvas_frame.columnconfigure(0, weight=1)
 
-        # 放大縮小按鈕放在畫布右上角
         self.output_canvas.update()
         canvas_w = self.output_canvas.winfo_width()
         self.zoom_in_btn.place(in_=self.output_canvas, x=canvas_w-50, y=10)
@@ -620,7 +620,7 @@ class MapPlotUI:
             self.add_error(error_msg)
             messagebox.showerror("缺少檔案", error_msg)
             self.data_folder = None
-            self._update_button_states()
+            #self._update_button_states()
             return
         try:
             map_files = load_map_data(folder_path)
@@ -644,7 +644,7 @@ class MapPlotUI:
             self.cargo_map_plotter.p_shelf = map_files['shelf']
             logging.info(f"已選擇資料夾: {folder_path}")
             #messagebox.showinfo("成功", "已成功載入所有必要檔案並驗證欄位格式")
-            self._update_button_states()
+            #self._update_button_states()
         except Exception as e:
             import traceback
             tb = traceback.extract_tb(e.__traceback__)
@@ -654,7 +654,7 @@ class MapPlotUI:
             self.add_error(error_msg)
             messagebox.showerror("錯誤", f"載入資料時發生錯誤: {str(e)}")
             self.data_folder = None
-            self._update_button_states()
+            #self._update_button_states()
 
     def load_and_plot_vehicle_map(self, folder_path):
         """載入指定資料夾並直接繪製車輛地圖"""
