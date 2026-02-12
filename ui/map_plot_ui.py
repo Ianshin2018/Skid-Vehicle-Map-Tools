@@ -65,7 +65,7 @@ class MapPlotUI:
         """
         self.root = tk.Tk()
         self._setup_window()
-        self._image_scale = 1.0
+        self._image_scale = 0.2
         self._original_pil_img = None
         self._create_widgets()
         # 初始化配置
@@ -315,42 +315,79 @@ class MapPlotUI:
             #self._update_button_states()
 
     def plot_vehicle_map(self):
-        """繪製車輛地圖"""
+        """繪製車輛地圖（支援顯示原始圖與加框圖兩圖層切換）"""
         try:
             if not self.data_folder:
                 raise ValueError("請先選擇包含必要檔案的資料夾")
 
-            # 從已載入的地圖資料中獲取無效 ID
             invalid_address_ids = set()
             invalid_section_ids = set()
-            
-            # 從驗證結果中直接獲取無效 ID
             if hasattr(self, 'map_data'):
                 if 'invalid_vehicle_address_ids' in self.map_data:
                     invalid_address_ids = self.map_data['invalid_vehicle_address_ids']
                 if 'invalid_vehicle_section_ids' in self.map_data:
                     invalid_section_ids = self.map_data['invalid_vehicle_section_ids']
-            
-            # 設定繪圖器的異常 ID
+
             if invalid_address_ids or invalid_section_ids:
                 self.vehicle_map_plotter.set_invalid_ids(invalid_address_ids, invalid_section_ids)
                 logging.info(f"已標記 {len(invalid_address_ids)} 個異常地址和 {len(invalid_section_ids)} 個異常路段")
-                
+
             self.vehicle_map_plotter.set_show_section_dist(self.show_section_dist.get() == '1')
             self.vehicle_map_plotter.set_show_tag_id(self.show_tag_id.get() == '1')
             self.vehicle_map_plotter.set_show_address_id(self.show_address_id.get() == '1')
+
+            # highlight list — 請確保型態與 df_addr['AddressId'] 一致
+            highlight_ids = ['106508700', ' 103505600']
+            highlight_ids = [int(str(i).strip()) for i in highlight_ids]
+            self.vehicle_map_plotter.set_highlight_address_ids(highlight_ids)
+
+            # 範例：要高亮的 sectionId（請依你的 df_section['SectionId'] 型態調整）
+            highlight_section_ids = ['10389', '10471']  # <-- 改成你要的 sectionId list
+            # 轉型（若 SectionId 為整數）
+            try:
+                highlight_section_ids = [int(str(s).strip()) for s in highlight_section_ids]
+            except Exception:
+                # 若 SectionId 為字串就保留原樣
+                highlight_section_ids = [str(s).strip() for s in highlight_section_ids]
+            self.vehicle_map_plotter.set_highlight_section_ids(highlight_section_ids)
+
+                # 執行繪圖（PlotterBase.execute 會建立 figure 並在該 figure 上繪製）
             self.vehicle_map_plotter.load()
             self.vehicle_map_plotter.execute()
+
+            # 取得第一圖層（PIL Image）
+            base_pil = self.vehicle_map_plotter.get_base_image()
+            # 取得第二圖層（matplotlib Figure -> PIL Image）
             fig = self.vehicle_map_plotter.get_figure()
+            overlay_pil = None
             if fig is not None:
                 buf = io.BytesIO()
-                fig.savefig(buf, format='png')
+                fig.savefig(buf, format='png', bbox_inches='tight')
                 buf.seek(0)
-                pil_img = Image.open(buf)
-                self.show_image_on_canvas(pil_img)  # 顯示於畫布
+                overlay_pil = Image.open(buf).convert("RGBA").copy()
+                buf.close()
+
+            # 儲存於 UI instance 以便在按鈕切換時使用
+            self._base_pil_img = base_pil if base_pil is not None else overlay_pil
+            self._overlay_pil_img = overlay_pil if overlay_pil is not None else self._base_pil_img
+
+            # 建立切換按鈕（只建立一次）
+            if not hasattr(self, "_show_base_btn"):
+                self._show_base_btn = tk.Button(self.canvas_frame, text="原始圖", width=8,
+                                               command=lambda: self.show_image_on_canvas(self._base_pil_img))
+                self._show_highlight_btn = tk.Button(self.canvas_frame, text="加框圖", width=8,
+                                                     command=lambda: self.show_image_on_canvas(self._overlay_pil_img))
+                # 放在 canvas_frame 的第 2 行（canvas 與 scrollbars 已佔用 row0,row1）
+                self._show_base_btn.grid(row=2, column=0, sticky="w", pady=5, padx=5)
+                self._show_highlight_btn.grid(row=2, column=1, sticky="w", pady=5, padx=5)
+
+            # 預設顯示 overlay（加框圖）
+            if self._overlay_pil_img:
+                self.show_image_on_canvas(self._overlay_pil_img)
+            elif self._base_pil_img:
+                self.show_image_on_canvas(self._base_pil_img)
 
             logging.info("車輛地圖繪製完成")
-            #messagebox.showinfo("成功", "車輛地圖繪製完成")
 
         except Exception as e:
             import traceback
@@ -610,6 +647,175 @@ class MapPlotUI:
         self._image_scale = max(self._image_scale / 1.2, 0.01)
         self._draw_scaled_image()
 
+    def _load_highlights(self, folder_path):
+        """
+        嘗試從專案根目錄（與 main.py 同一層）讀取 highlights.csv，
+        若找不到再到指定的 folder_path 搜尋。預期欄位: Floor, Type, Id
+        """
+        self.highlights_df = None
+        try:
+            # 專案根目錄（ui 的上層為 mapplot，mapplot 的上層為專案根）
+            project_root = os.path.abspath(os.path.join(PROJECT_ROOT, ".."))
+            candidates = [
+                os.path.join(project_root, "highlights.csv"),
+                os.path.join(folder_path or "", "highlights.csv")
+            ]
+            csv_path = None
+            for p in candidates:
+                if p and os.path.isfile(p):
+                    csv_path = p
+                    break
+
+            if not csv_path:
+                logging.info(f"未找到 highlights.csv（搜尋路徑: {candidates}），跳過自動高亮設定")
+                return
+
+            import pandas as _pd
+            df = _pd.read_csv(csv_path, dtype=str).fillna("")
+            logging.info(f"從 {csv_path} 載入 highlights.csv (共 {len(df)} 筆)")
+
+            # 標準化欄位名稱
+            cols = {c.lower(): c for c in df.columns}
+            low = {k.lower(): v for k, v in cols.items()}
+            # 需要 floor,type,id 三個欄位
+            if not any(k in low for k in ("floor",)) or not any(k in low for k in ("type",)) or not any(k in low for k in ("id", "idx", "sectionid")):
+                logging.warning("highlights.csv 欄位不足，需包含 Floor, Type, Id")
+                return
+            # 重新命名到統一欄位
+            df = df.rename(columns={low.get("floor"): "Floor", low.get("type"): "Type", low.get("id", low.get("idx", low.get("sectionid"))): "Id"})
+            df["Floor"] = df["Floor"].astype(str).str.strip().str.upper()
+            df["Type"] = df["Type"].astype(str).str.strip().str.lower()
+            df["Id"] = df["Id"].astype(str).str.strip()
+            # 保留合法 Type
+            df = df[df["Type"].isin(["address", "section"])]
+            self.highlights_df = df
+        except Exception as e:
+            logging.warning(f"讀取 highlights.csv 失敗: {e}")
+            self.highlights_df = None
+
+    def _load_highlight_log(self, folder_path):
+        """
+        讀取 highlight log CSV：優先於專案根目錄（與 main.py 同層）搜尋，
+        若找不到再於 folder_path 搜尋。標準欄位: start_date, number, addressid, sectionid
+        """
+        try:
+            import pandas as _pd
+            project_root = os.path.abspath(os.path.join(PROJECT_ROOT, ".."))
+            filenames = ("highlights.csv", "highlight_log.csv", "highlights_log.csv")
+            csv_path = None
+            # 優先在專案根搜尋，再在 folder_path 搜尋
+            search_paths = []
+            for fname in filenames:
+                search_paths.append(os.path.join(project_root, fname))
+            for fname in filenames:
+                search_paths.append(os.path.join(folder_path or "", fname))
+
+            for p in search_paths:
+                if p and os.path.isfile(p):
+                    csv_path = p
+                    break
+
+            if not csv_path:
+                logging.info(f"未找到 highlight log CSV（搜尋: {search_paths}），跳過載入")
+                self.highlight_log_df = None
+                return
+
+            df = _pd.read_csv(csv_path, dtype=str).fillna("")
+            df.columns = [c.strip().lower() for c in df.columns]
+
+            # 確保欄位存在，若缺則建立空欄
+            for col in ("start_date", "number", "addressid", "sectionid"):
+                if col not in df.columns:
+                    df[col] = ""
+
+            # 只保留必要欄並標準化為字串
+            df = df[["start_date", "number", "addressid", "sectionid"]].astype(str).apply(lambda s: s.str.strip())
+            self.highlight_log_df = df
+            logging.info(f"從 {csv_path} 載入 highlight log，共 {len(df)} 筆記錄")
+        except Exception as e:
+            logging.warning(f"讀取 highlights CSV 失敗: {e}")
+            self.highlight_log_df = None
+
+    def _floor_from_folder(self, folder_path):
+        """
+        從資料夾路徑或名稱猜測樓層標籤，回傳 '1F'/'2F'/'3F' 或 None。
+        主要用於 floor 按鈕傳入的 folder_path。
+        """
+        base = os.path.basename(folder_path).upper()
+        p = folder_path.replace("\\", "/").upper()
+        # 明確判斷
+        if "1F" in base or "GARMIN1F" in base or "/1F" in p or base.endswith("1F"):
+            return "1F"
+        if "2F" in base or "GARMIN2F" in base or "/2F" in p or base.endswith("2F"):
+            return "2F"
+        if "3F" in base or "GARMIN3F" in base or "/3F" in p or base.endswith("3F"):
+            return "3F"
+        return None
+
+    def _get_highlights_for_floor(self, floor_label):
+        """
+        根據 floor_label 回傳 (address_ids, section_ids) 兩個 list。
+        規則（由使用者指定）：
+          - 1F: number 101..115
+          - 2F: number 116..137 和 140
+          - 3F: number 138, 139
+        每筆紀錄優先取 addressid（非空），若 addressid 空則取 sectionid；兩者皆空則跳過。
+        number 需能轉為 int 才比對；回傳 id 會嘗試轉為 int（若為純數字）。
+        """
+        addr_ids = []
+        sec_ids = []
+        if getattr(self, "highlight_log_df", None) is None or floor_label is None:
+            return addr_ids, sec_ids
+
+        df = self.highlight_log_df.copy()
+
+        def to_int_safe(s):
+            try:
+                return int(str(s).strip())
+            except Exception:
+                return None
+
+        df["_num"] = df["number"].apply(to_int_safe)
+
+        want_nums = set()
+        if floor_label == "1F":
+            want_nums.update(range(101, 116))
+        elif floor_label == "2F":
+            want_nums.update(range(116, 138))
+            want_nums.add(140)
+        elif floor_label == "3F":
+            want_nums.update([138, 139])
+
+        sel = df[df["_num"].isin(want_nums)]
+
+        for _, row in sel.iterrows():
+            addr = row.get("addressid", "")
+            sec = row.get("sectionid", "")
+            chosen = None
+            chosen_type = None
+            if isinstance(addr, str) and addr.strip() != "":
+                chosen = addr.strip()
+                chosen_type = "address"
+            elif isinstance(sec, str) and sec.strip() != "":
+                chosen = sec.strip()
+                chosen_type = "section"
+            else:
+                continue
+
+            # 轉為 int 若可能
+            try:
+                val = int(chosen)
+            except Exception:
+                val = chosen
+
+            if chosen_type == "address":
+                addr_ids.append(val)
+            else:
+                sec_ids.append(val)
+
+        logging.info(f"樓層 {floor_label} 取得高亮：{len(addr_ids)} addresses, {len(sec_ids)} sections")
+        return addr_ids, sec_ids
+
     def load_fixed_folder(self, folder_path):
         """讀取指定資料夾"""
         self.clear_status_messages()
@@ -620,7 +826,6 @@ class MapPlotUI:
             self.add_error(error_msg)
             messagebox.showerror("缺少檔案", error_msg)
             self.data_folder = None
-            #self._update_button_states()
             return
         try:
             map_files = load_map_data(folder_path)
@@ -643,8 +848,10 @@ class MapPlotUI:
             self.cargo_map_plotter.p_port = map_files['port']
             self.cargo_map_plotter.p_shelf = map_files['shelf']
             logging.info(f"已選擇資料夾: {folder_path}")
-            #messagebox.showinfo("成功", "已成功載入所有必要檔案並驗證欄位格式")
-            #self._update_button_states()
+            # 載入 highlights.csv（若存在）
+            self._load_highlights(folder_path)
+            # 載入 highlight_log.csv（若存在）
+            self._load_highlight_log(folder_path)
         except Exception as e:
             import traceback
             tb = traceback.extract_tb(e.__traceback__)
@@ -654,12 +861,102 @@ class MapPlotUI:
             self.add_error(error_msg)
             messagebox.showerror("錯誤", f"載入資料時發生錯誤: {str(e)}")
             self.data_folder = None
-            #self._update_button_states()
 
     def load_and_plot_vehicle_map(self, folder_path):
         """載入指定資料夾並直接繪製車輛地圖"""
+        # 推斷樓層並記錄，供 plot_vehicle_map 使用
+        self._current_floor = self._floor_from_folder(folder_path)
         self.load_fixed_folder(folder_path)
         # 若資料夾載入成功才繪圖
         if self.data_folder:
             self.plot_vehicle_map()
 
+    def plot_vehicle_map(self):
+        """繪製車輛地圖（支援樓層對應的 highlights.csv）"""
+        try:
+            if not self.data_folder:
+                raise ValueError("請先選擇包含必要檔案的資料夾")
+
+            invalid_address_ids = set()
+            invalid_section_ids = set()
+            if hasattr(self, 'map_data'):
+                if 'invalid_vehicle_address_ids' in self.map_data:
+                    invalid_address_ids = self.map_data['invalid_vehicle_address_ids']
+                if 'invalid_vehicle_section_ids' in self.map_data:
+                    invalid_section_ids = self.map_data['invalid_vehicle_section_ids']
+
+            if invalid_address_ids or invalid_section_ids:
+                self.vehicle_map_plotter.set_invalid_ids(invalid_address_ids, invalid_section_ids)
+                logging.info(f"已標記 {len(invalid_address_ids)} 個異常地址和 {len(invalid_section_ids)} 個異常路段")
+
+            self.vehicle_map_plotter.set_show_section_dist(self.show_section_dist.get() == '1')
+            self.vehicle_map_plotter.set_show_tag_id(self.show_tag_id.get() == '1')
+            self.vehicle_map_plotter.set_show_address_id(self.show_address_id.get() == '1')
+
+            # 由 highlights.csv 決定本次要高亮的 address / section
+            addr_ids, sec_ids = self._get_highlights_for_floor(getattr(self, "_current_floor", None))
+
+            # 若沒有 highlights，仍可用 UI code 指定預設（可保留或移除）
+            if not addr_ids:
+                # 預設範例（如需移除請刪掉這三行）
+                # addr_ids = ['106508700', '103505600']
+                addr_ids = []
+            if not sec_ids:
+                sec_ids = []
+
+            # 轉換 id 型態（若原本是字串數字轉為 int）
+            def cast_ids(lst):
+                out = []
+                for v in lst:
+                    if isinstance(v, str):
+                        s = v.strip()
+                        if s.isdigit():
+                            out.append(int(s))
+                        else:
+                            out.append(s)
+                    else:
+                        out.append(v)
+                return out
+
+            self.vehicle_map_plotter.set_highlight_address_ids(cast_ids(addr_ids))
+            self.vehicle_map_plotter.set_highlight_section_ids(cast_ids(sec_ids))
+
+            # 執行繪圖
+            self.vehicle_map_plotter.load()
+            self.vehicle_map_plotter.execute()
+
+            # 取得圖像並顯示（保持原有邏輯）
+            base_pil = self.vehicle_map_plotter.get_base_image()
+            fig = self.vehicle_map_plotter.get_figure()
+            overlay_pil = None
+            if fig is not None:
+                buf = io.BytesIO()
+                fig.savefig(buf, format='png', bbox_inches='tight', pad_inches=0)
+                buf.seek(0)
+                overlay_pil = Image.open(buf).convert("RGBA").copy()
+                buf.close()
+
+            self._base_pil_img = base_pil if base_pil is not None else overlay_pil
+            self._overlay_pil_img = overlay_pil if overlay_pil is not None else self._base_pil_img
+
+            if not hasattr(self, "_show_base_btn"):
+                self._show_base_btn = tk.Button(self.canvas_frame, text="原始圖", width=8,
+                                               command=lambda: self.show_image_on_canvas(self._base_pil_img))
+                self._show_highlight_btn = tk.Button(self.canvas_frame, text="加框圖", width=8,
+                                                     command=lambda: self.show_image_on_canvas(self._overlay_pil_img))
+                self._show_base_btn.grid(row=2, column=0, sticky="w", pady=5, padx=5)
+                self._show_highlight_btn.grid(row=2, column=1, sticky="w", pady=5, padx=5)
+
+            if self._overlay_pil_img:
+                self.show_image_on_canvas(self._overlay_pil_img)
+            elif self._base_pil_img:
+                self.show_image_on_canvas(self._base_pil_img)
+
+            logging.info("車輛地圖繪製完成")
+
+        except Exception as e:
+            import traceback
+            tb = traceback.extract_tb(e.__traceback__)
+            filename, line, func, text = tb[-1]
+            logging.error(f"錯誤: {str(e)} | 檔案: {filename} | 行數: {line} | 類型: {type(e).__name__}")
+            messagebox.showerror("錯誤", f"繪製車輛地圖時發生錯誤: {str(e)}")

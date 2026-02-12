@@ -32,7 +32,7 @@ class CargoMapPlotter(PlotterBase):
         super().__init__()
         self.drawn_sections = set()  # 用於追蹤已繪製的路段
 
-    def plot(self):
+    def plot(self, ax):
         """繪製貨物地圖"""
         df_addr = self.df_addr
         x_dict = self.x_dict
