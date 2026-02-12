@@ -177,6 +177,13 @@ class MapPlotUI:
         self.output_canvas.bind("<ButtonPress-1>", self._start_move)
         self.output_canvas.bind("<B1-Motion>", self._move_canvas)
 
+        # 新增滑鼠滾輪縮放支援（Windows / Mac / Linux）
+        # Windows / Mac: <MouseWheel>， event.delta (正負)
+        # Linux: <Button-4> (up), <Button-5> (down)
+        self.output_canvas.bind("<MouseWheel>", self._on_mousewheel)      # Windows / macOS
+        self.output_canvas.bind("<Button-4>", self._on_mousewheel)       # Linux scroll up
+        self.output_canvas.bind("<Button-5>", self._on_mousewheel)       # Linux scroll down
+
         # 新增三個樓層按鈕
         self.floor_buttons = []
         floor_info = [
@@ -960,3 +967,96 @@ class MapPlotUI:
             filename, line, func, text = tb[-1]
             logging.error(f"錯誤: {str(e)} | 檔案: {filename} | 行數: {line} | 類型: {type(e).__name__}")
             messagebox.showerror("錯誤", f"繪製車輛地圖時發生錯誤: {str(e)}")
+
+    def _on_mousewheel(self, event):
+        """
+        以滑鼠游標為焦點縮放畫布上的影像（支援 Windows/macOS/Linux）。
+        修正：使用螢幕滑鼠座標轉換為 canvas widget 座標，並以 (new_w - canvas_w)/(new_h - canvas_h)
+        作為分母計算 xview/yview 的 fraction，避免縮放時跳到最左或最右。
+        """
+        if not hasattr(self, '_original_pil_img') or self._original_pil_img is None:
+            return
+
+        old_scale = getattr(self, "_image_scale", 1.0)
+        factor = 1.1
+
+        # 判斷滾輪方向
+        delta = 0
+        if hasattr(event, 'delta') and event.delta:
+            delta = event.delta
+        elif hasattr(event, 'num'):
+            # Linux: Button-4 up, Button-5 down
+            if event.num == 4:
+                delta = 1
+            elif event.num == 5:
+                delta = -1
+
+        if delta > 0:
+            new_scale = min(old_scale * factor, 5.0)
+        else:
+            new_scale = max(old_scale / factor, 0.05)
+
+        if abs(new_scale - old_scale) < 1e-9:
+            return
+
+        # 確保 widget 尺寸與 scrollregion 更新準確
+        self.output_canvas.update_idletasks()
+
+        # 取得滑鼠在螢幕的絕對位置，再轉為 canvas widget 的相對座標（更穩定）
+        try:
+            px = self.output_canvas.winfo_pointerx()
+            py = self.output_canvas.winfo_pointery()
+            widget_x = px - self.output_canvas.winfo_rootx()
+            widget_y = py - self.output_canvas.winfo_rooty()
+        except Exception:
+            # fallback 使用 event.x/event.y
+            widget_x = getattr(event, 'x', 0)
+            widget_y = getattr(event, 'y', 0)
+
+        # 取得 canvas 上對應的 canvas-coords（包含當前滾動位移）
+        canvas_x = self.output_canvas.canvasx(widget_x)
+        canvas_y = self.output_canvas.canvasy(widget_y)
+
+        # 轉回原始 image 座標（以 old_scale）
+        img_x = canvas_x / old_scale
+        img_y = canvas_y / old_scale
+
+        # 設定新比例並重繪
+        self._image_scale = new_scale
+        self._draw_scaled_image()
+
+        # 重新確保 widget 與 image 更新
+        self.output_canvas.update_idletasks()
+
+        # 計算新的 canvas 座標（image 在 canvas 中的坐標）
+        new_canvas_x = img_x * new_scale
+        new_canvas_y = img_y * new_scale
+
+        # 計算新尺寸與 viewport
+        new_w = max(int(self._original_pil_img.width * new_scale), 1)
+        new_h = max(int(self._original_pil_img.height * new_scale), 1)
+        canvas_w = max(self.output_canvas.winfo_width(), 1)
+        canvas_h = max(self.output_canvas.winfo_height(), 1)
+
+        # 計算 left/top（希望可視區的左上座標）
+        desired_left = new_canvas_x - widget_x
+        desired_top = new_canvas_y - widget_y
+
+        # 計算 fraction，分母使用 scrollable range (new_w - canvas_w)
+        scrollable_w = max(new_w - canvas_w, 1)
+        scrollable_h = max(new_h - canvas_h, 1)
+
+        frac_x = desired_left / float(scrollable_w)
+        frac_y = desired_top / float(scrollable_h)
+
+        frac_x = self._clamp(frac_x, 0.0, 1.0)
+        frac_y = self._clamp(frac_y, 0.0, 1.0)
+
+        try:
+            self.output_canvas.xview_moveto(frac_x)
+        except Exception:
+            pass
+        try:
+            self.output_canvas.yview_moveto(frac_y)
+        except Exception:
+            pass
