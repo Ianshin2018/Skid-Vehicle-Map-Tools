@@ -60,6 +60,7 @@ def load_map_data(folder_path):
     logging.info(f"成功載入地圖資料，位於：{folder_path}")
     return map_files
 
+
 def get_invalid_ids_from_validators(validators):
     """
     從驗證器物件中獲取所有無效的 ID
@@ -97,13 +98,60 @@ def get_invalid_ids_from_validators(validators):
     
     return invalid_address_ids, invalid_section_ids
 
-def load_and_validate_map_data(folder_path, strict=False):
+
+def quick_validate_columns(data, strict=False):
+    """
+    快速驗證數據框欄位（輕量級驗證）
+    
+    這個函數執行基本的欄位檢查，比完整驗證更快。
+    適用於預加載場景。
+    
+    Args:
+        data (dict): 包含 DataFrame 的字典
+        strict (bool): 嚴格模式
+        
+    Returns:
+        tuple: (errors list, warnings list)
+    """
+    errors = []
+    warnings = []
+    
+    # 定義必要的欄位
+    required_columns = {
+        'address': ['AddressId', 'X', 'Y'],
+        'section': ['SectionId', 'FromAddressId', 'ToAddressId'],
+        'port': ['PortId'],
+        'shelf': ['ShelfId']
+    }
+    
+    # 檢查每個數據類型
+    for data_type, columns in required_columns.items():
+        if data_type not in data or data[data_type] is None:
+            errors.append(f"缺少 {data_type} 數據")
+            continue
+            
+        df = data[data_type]
+        if df.empty:
+            warnings.append(f"{data_type} 數據為空")
+            continue
+            
+        # 檢查必要欄位
+        missing_cols = [col for col in columns if col not in df.columns]
+        if missing_cols:
+            errors.append(f"{data_type} 缺少必要欄位: {', '.join(missing_cols)}")
+    
+    return errors, warnings
+
+
+def load_and_validate_map_data(folder_path, strict=False, use_cache=True, lightweight=True):
     """
     載入並驗證地圖資料
     
     Args:
         folder_path (str): 地圖資料所在的資料夾路徑
         strict (bool, optional): 嚴格模式 - 若為True則缺少欄位時會拋出例外，若為False則僅記錄警告。預設為True。
+        use_cache (bool): 是否使用數據緩存。默認 True。
+        lightweight (bool): 是否使用輕量級驗證（只驗證欄位，不做交叉驗證）。默認 True。
         
     Returns:
         dict: 包含各種地圖資料的字典，格式為 {'file_type': dataframe}，
@@ -115,6 +163,7 @@ def load_and_validate_map_data(folder_path, strict=False):
     """
     # 先檢查檔案是否存在
     map_files = load_map_data(folder_path)
+    
     # 載入所有CSV檔案
     data = {}
     try:
@@ -128,46 +177,53 @@ def load_and_validate_map_data(folder_path, strict=False):
         data['validation_warnings'] = []
         
         try:
-            # 先驗證所有資料檔案的欄位
-            validate_all_data_files(data, strict)
-              # 使用檔案交叉驗證器進行更深入的檢查
-            cross_validator = FileCrossValidator(data)
-            cross_validator.validate(strict=False)  # 先用非嚴格模式收集所有錯誤
-              # 收集驗證器中的錯誤和警告
-            validation_summary = cross_validator.get_validation_summary()
-            data['validation_errors'] = validation_summary["errors"].copy()
-            data['validation_warnings'] = validation_summary["warnings"].copy()
-            
-            # 收集異常的 ID 列表
-            invalid_vehicle_address_ids, invalid_vehicle_section_ids, invalid_cargo_address_ids, invalid_cargo_section_ids = cross_validator.get_invalid_ids()
-            data['invalid_vehicle_address_ids'] = invalid_vehicle_address_ids
-            data['invalid_vehicle_section_ids'] = invalid_vehicle_section_ids
-            data['invalid_cargo_address_ids'] = invalid_cargo_address_ids
-            data['invalid_cargo_section_ids'] = invalid_cargo_section_ids
-            logging.info(f"驗證過程中針對站點共發現 {len(invalid_vehicle_address_ids)} 個異常地址和 {len(invalid_vehicle_section_ids)} 個異常路段")
-            logging.info(f"驗證過程中共針對貨物發現 {len(invalid_cargo_address_ids)} 個異常地址和 {len(invalid_cargo_section_ids)} 個異常路段")
-            
-            # 保存驗證器實例，以便後續可能的處理
-            # data['validators'] = {
-            #     'cross_validator': cross_validator,
-            #     'address_validator': cross_validator.address_validator if hasattr(cross_validator, 'address_validator') else None,
-            #     'section_validator': cross_validator.section_validator if hasattr(cross_validator, 'section_validator') else None,
-            #     'port_validator': cross_validator.port_validator if hasattr(cross_validator, 'port_validator') else None,
-            #     'shelf_validator': cross_validator.shelf_validator if hasattr(cross_validator, 'shelf_validator') else None
-            # }
-                        # 使用新函式收集所有無效 ID
-            # invalid_address_ids, invalid_section_ids = get_invalid_ids_from_validators(data['validators'])
-            # data['invalid_address_ids'] = invalid_address_ids
-            # data['invalid_section_ids'] = invalid_section_ids
-            # logging.info(f"驗證過程中共發現 {len(invalid_address_ids)} 個異常地址和 {len(invalid_section_ids)} 個異常路段")
+            if lightweight:
+                # 輕量級驗證：只檢查必要欄位
+                errors, warnings = quick_validate_columns(data, strict)
+                data['validation_errors'].extend(errors)
+                data['validation_warnings'].extend(warnings)
+                
+                # 輕量級模式下，設定空的無效 ID 集合
+                data['invalid_vehicle_address_ids'] = set()
+                data['invalid_vehicle_section_ids'] = set()
+                data['invalid_cargo_address_ids'] = set()
+                data['invalid_cargo_section_ids'] = set()
+                
+                if errors:
+                    logging.warning(f"輕量級驗證發現 {len(errors)} 個錯誤")
+                if warnings:
+                    logging.warning(f"輕量級驗證發現 {len(warnings)} 個警告")
+                    
+            else:
+                # 完整驗證（原有邏輯）
+                # 先驗證所有資料檔案的欄位
+                validate_all_data_files(data, strict)
+                  
+                # 使用檔案交叉驗證器進行更深入的檢查
+                cross_validator = FileCrossValidator(data)
+                cross_validator.validate(strict=False)  # 先用非嚴格模式收集所有錯誤
+                  
+                # 收集驗證器中的錯誤和警告
+                validation_summary = cross_validator.get_validation_summary()
+                data['validation_errors'] = validation_summary["errors"].copy()
+                data['validation_warnings'] = validation_summary["warnings"].copy()
+                
+                # 收集異常的 ID 列表
+                invalid_vehicle_address_ids, invalid_vehicle_section_ids, invalid_cargo_address_ids, invalid_cargo_section_ids = cross_validator.get_invalid_ids()
+                data['invalid_vehicle_address_ids'] = invalid_vehicle_address_ids
+                data['invalid_vehicle_section_ids'] = invalid_vehicle_section_ids
+                data['invalid_cargo_address_ids'] = invalid_cargo_address_ids
+                data['invalid_cargo_section_ids'] = invalid_cargo_section_ids
+                logging.info(f"驗證過程中針對站點共發現 {len(invalid_vehicle_address_ids)} 個異常地址和 {len(invalid_vehicle_section_ids)} 個異常路段")
+                logging.info(f"驗證過程中共針對貨物發現 {len(invalid_cargo_address_ids)} 個異常地址和 {len(invalid_cargo_section_ids)} 個異常路段")
+                
+                logging.info("所有資料檔案已成功載入並通過欄位和交叉驗證")
             
             # 如果是嚴格模式且有錯誤，則拋出例外
             if strict and data['validation_errors']:
                 error_message = "檔案交叉驗證失敗，發現以下問題:\n" + "\n".join(data['validation_errors'])
                 logging.error(error_message)
                 raise ValueError(error_message)
-            
-            logging.info("所有資料檔案已成功載入並通過欄位和交叉驗證")
             
         except Exception as e:
             # 將例外訊息也添加到驗證錯誤中
@@ -186,4 +242,3 @@ def load_and_validate_map_data(folder_path, strict=False):
         tb = traceback.extract_tb(e.__traceback__)
         filename, line, func, text = tb[-1]
         logging.error(f"載入或驗證資料時發生錯誤: {str(e)} | 檔案: {filename} | 行數: {line} | 類型: {type(e).__name__}")
-        raise

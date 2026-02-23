@@ -35,11 +35,17 @@ class PlotterBase:
         self.invalid_address_ids = set()
         self.invalid_section_ids = set()
         self.figure = None
-        self.base_image = None  # 儲存第一圖層（PIL Image）
+        self.base_image = None  # 儲存第一圖層（PIL Image）- 底圖
+        self.zone_image = None  # 儲存第二圖層（PIL Image）- 淡藍色大方框
+        self.overlay_image = None  # 儲存第三圖層（PIL Image）- 紅色小方框
 
         # highlight sets
         self.highlight_address_ids = set()
         self.highlight_section_ids = set()
+
+        # zone data (大方框區域)
+        self.zone_csv_path = None
+        self.zone_data = {}  # {zone_name: [addressid1, addressid2, ...]}
 
         # 設定日誌
         self._setup_logging()
@@ -95,7 +101,7 @@ class PlotterBase:
         except Exception:
             pass
 
-        # --- 儲存「原始輸出圖片」（第一圖層） ---
+        # --- 儲存「原始輸出圖片」（第一圖層 - 底圖） ---
         try:
             buf = io.BytesIO()
             # 儲存當前 figure（此時尚未加 highlight 方框）
@@ -108,7 +114,131 @@ class PlotterBase:
             logging.warning(f"無法儲存 base image: {e}")
             self.base_image = None
 
-        # --- 在同一個 ax 上加上 highlight 方框（第二圖層） ---
+        # --- 建立第二個獨立的透明圖層，只繪製方框 ---
+        self.overlay_image = None
+
+        # 檢查是否有任何高亮需求
+        has_highlights = (hasattr(self, "highlight_address_ids") and self.highlight_address_ids) or \
+                        (hasattr(self, "highlight_section_ids") and self.highlight_section_ids)
+
+        if has_highlights:
+            try:
+                # 獲取原 figure 的尺寸和坐標範圍
+                fig_size = self.figure.get_size_inches()
+                xlim = ax.get_xlim()
+                ylim = ax.get_ylim()
+
+                # 創建新的透明 figure（只用於繪製方框）
+                overlay_fig, overlay_ax = plt.subplots(figsize=fig_size)
+                overlay_ax.set_xlim(xlim)
+                overlay_ax.set_ylim(ylim)
+                overlay_ax.set_aspect(ax.get_aspect())
+
+                # 隱藏座標軸
+                overlay_ax.set_axis_off()
+                overlay_ax.tick_params(left=False, labelleft=False, bottom=False, labelbottom=False)
+                for spine in overlay_ax.spines.values():
+                    spine.set_visible(False)
+
+                # 在兩個 ax 上都繪製高亮方框（原 ax 保持向後兼容，overlay_ax 用於圖層）
+                self._draw_highlights_on_ax(ax, overlay_ax)
+
+                # 保存透明圖層
+                buf = io.BytesIO()
+                overlay_fig.savefig(buf, format='png', bbox_inches='tight', pad_inches=0,
+                                   facecolor='none', transparent=True)
+                buf.seek(0)
+                self.overlay_image = Image.open(buf).convert("RGBA").copy()
+                buf.close()
+
+                # 關閉 overlay figure 釋放記憶體
+                plt.close(overlay_fig)
+
+            except Exception as e:
+                logging.warning(f"無法建立 overlay image: {e}")
+                self.overlay_image = None
+
+        # 可能需要刷新或調整座標
+        try:
+            ax.autoscale_view()
+        except Exception:
+            pass
+
+    def _draw_zones_on_ax(self, ax):
+        """在指定的 ax 上繪製淡藍色大方框（zone 區域）
+
+        Args:
+            ax: matplotlib 座標軸
+        """
+        if not self.zone_data:
+            logging.debug("沒有 zone 資料，跳過繪製")
+            return
+
+        for zone_name, addressids in self.zone_data.items():
+            if not addressids:
+                continue
+
+            # 收集所有 addressid 的座標
+            coords = []
+            for addr_id in addressids:
+                addr_id_str = str(addr_id).strip()
+
+                # 在 df_addr 中查找該 addressid
+                matched = self.df_addr[self.df_addr['AddressId'].astype(str).str.strip() == addr_id_str]
+
+                if matched.empty:
+                    # 嘗試數值比較
+                    try:
+                        addr_id_int = int(addr_id_str)
+                        matched = self.df_addr[self.df_addr['AddressId'].astype(str).str.strip().apply(
+                            lambda s: s.isdigit() and int(s) == addr_id_int)]
+                    except Exception:
+                        pass
+
+                if not matched.empty:
+                    for _, row in matched.iterrows():
+                        coords.append((row['X'], row['Y']))
+                else:
+                    logging.debug(f"Zone '{zone_name}' 中的 addressid {addr_id_str} 未在地圖中找到")
+
+            if not coords:
+                logging.warning(f"Zone '{zone_name}' 沒有有效的座標，跳過繪製")
+                continue
+
+            # 計算 bounding box
+            xs = [c[0] for c in coords]
+            ys = [c[1] for c in coords]
+
+            xmin, xmax = min(xs), max(xs)
+            ymin, ymax = min(ys), max(ys)
+
+            # 加上 padding（讓框不要太緊貼）
+            padding = 6.0
+            xmin -= padding
+            ymin -= padding
+            width = (xmax - xmin) + 2 * padding
+            height = (ymax - ymin) + 2 * padding
+
+            # 繪製淡藍色大方框：粗框 + 半透明填充
+            zone_rect = plt.Rectangle(
+                (xmin, ymin), width, height,
+                linewidth=5,
+                edgecolor='skyblue',  # 淡藍色邊框
+                facecolor='lightblue',  # 淡藍色填充
+                alpha=0.3,  # 半透明
+                zorder=5  # 圖層順序：在底圖之上，在高亮方框之下
+            )
+            ax.add_patch(zone_rect)
+
+            logging.info(f"繪製 zone '{zone_name}': {len(coords)} 個 addressid, bbox=({xmin:.1f}, {ymin:.1f}, {width:.1f}, {height:.1f})")
+
+    def _draw_highlights_on_ax(self, ax, overlay_ax=None):
+        """在指定的 ax 上繪製高亮方框
+
+        Args:
+            ax: 主 figure 的座標軸
+            overlay_ax: 透明圖層的座標軸（可選）
+        """
         # address highlights（單點方框）
         if hasattr(self, "highlight_address_ids") and self.highlight_address_ids:
             try:
@@ -136,6 +266,10 @@ class PlotterBase:
                         x, y = r['X'], r['Y']
                         rect = plt.Rectangle((x-2, y-2), 4, 4, linewidth=5, edgecolor='red', facecolor='none', zorder=10)
                         ax.add_patch(rect)
+                        # 如果有 overlay_ax，也在上面畫
+                        if overlay_ax is not None:
+                            rect_overlay = plt.Rectangle((x-2, y-2), 4, 4, linewidth=5, edgecolor='red', facecolor='none', zorder=10)
+                            overlay_ax.add_patch(rect_overlay)
                         found_addrs.add(str(r['AddressId']).strip())
                 missing_addrs = set(want_addrs) - found_addrs
                 if missing_addrs:
@@ -184,6 +318,9 @@ class PlotterBase:
                 # 畫粗線代表高亮路段（保留原有視覺提示）
                 try:
                     ax.plot([x1, x2], [y1, y2], color='orange', linewidth=3.5, zorder=9)
+                    # 如果有 overlay_ax，也在上面畫
+                    if overlay_ax is not None:
+                        overlay_ax.plot([x1, x2], [y1, y2], color='orange', linewidth=3.5, zorder=9)
                 except Exception as e:
                     logging.debug(f"繪製高亮路段 {sec_row['SectionId']} 失敗: {e}")
 
@@ -207,6 +344,11 @@ class PlotterBase:
                     bbox_rect = plt.Rectangle((xmin, ymin), width, height,
                                               linewidth=5, edgecolor='red', facecolor='none', zorder=11)
                     ax.add_patch(bbox_rect)
+                    # 如果有 overlay_ax，也在上面畫
+                    if overlay_ax is not None:
+                        bbox_rect_overlay = plt.Rectangle((xmin, ymin), width, height,
+                                                          linewidth=5, edgecolor='red', facecolor='none', zorder=11)
+                        overlay_ax.add_patch(bbox_rect_overlay)
                 except Exception as e:
                     logging.debug(f"繪製路段外框 {sec_row['SectionId']} 失敗: {e}")
 
@@ -214,18 +356,78 @@ class PlotterBase:
             if missing:
                 logging.warning(f"以下高亮路段在 df_section 找不到：{missing}")
 
-        # 可能需要刷新或調整座標
+    def regenerate_overlay(self):
+        """只重新生成 overlay 圖層（不重新繪製底圖）
+
+        用於當高亮 ID 改變時，只更新方框圖層而不重新繪製整個底圖，提高性能。
+        前提：必須已經執行過 execute() 方法，且 figure 仍然存在。
+        """
+        if not hasattr(self, 'figure') or self.figure is None:
+            logging.warning("尚未執行 execute()，無法重新生成 overlay")
+            return False
+
+        # 檢查是否有任何高亮需求
+        has_highlights = (hasattr(self, "highlight_address_ids") and self.highlight_address_ids) or \
+                        (hasattr(self, "highlight_section_ids") and self.highlight_section_ids)
+
+        if not has_highlights:
+            # 沒有高亮需求，清空 overlay
+            self.overlay_image = None
+            logging.info("沒有高亮需求，已清空 overlay 圖層")
+            return True
+
         try:
-            ax.autoscale_view()
-        except Exception:
-            pass
+            # 獲取原 figure 的主 ax
+            ax = self.figure.axes[0] if self.figure.axes else None
+            if ax is None:
+                logging.warning("找不到原 figure 的 axes")
+                return False
+
+            # 獲取原 figure 的尺寸和坐標範圍
+            fig_size = self.figure.get_size_inches()
+            xlim = ax.get_xlim()
+            ylim = ax.get_ylim()
+
+            # 創建新的透明 figure（只用於繪製方框）
+            overlay_fig, overlay_ax = plt.subplots(figsize=fig_size)
+            overlay_ax.set_xlim(xlim)
+            overlay_ax.set_ylim(ylim)
+            overlay_ax.set_aspect(ax.get_aspect())
+
+            # 隱藏座標軸
+            overlay_ax.set_axis_off()
+            overlay_ax.tick_params(left=False, labelleft=False, bottom=False, labelbottom=False)
+            for spine in overlay_ax.spines.values():
+                spine.set_visible(False)
+
+            # 只在 overlay_ax 上繪製高亮方框
+            self._draw_highlights_on_ax(overlay_ax, overlay_ax)
+
+            # 保存透明圖層
+            buf = io.BytesIO()
+            overlay_fig.savefig(buf, format='png', bbox_inches='tight', pad_inches=0,
+                               facecolor='none', transparent=True)
+            buf.seek(0)
+            self.overlay_image = Image.open(buf).convert("RGBA").copy()
+            buf.close()
+
+            # 關閉 overlay figure 釋放記憶體
+            plt.close(overlay_fig)
+
+            logging.info("成功重新生成 overlay 圖層")
+            return True
+
+        except Exception as e:
+            logging.error(f"重新生成 overlay 圖層失敗: {e}")
+            self.overlay_image = None
+            return False
 
     def load(self):
         """載入地圖資料"""
         logging.info(f'載入資料自 {self.p_addr} 和 {self.p_section}')
         try:
             self.df_addr = pd.read_csv(self.p_addr)
-            self.df_section = pd.read_csv(self.p_section)            
+            self.df_section = pd.read_csv(self.p_section)
             logging.info('資料成功載入')
         except FileNotFoundError as e:
             import traceback
@@ -233,6 +435,56 @@ class PlotterBase:
             filename, line, func, text = tb[-1]
             logging.error(f"錯誤: 找不到 CSV 檔案。{e} | 檔案: {filename} | 行數: {line} | 類型: {type(e).__name__}")
             raise
+
+    def load_zone_csv(self, zone_csv_path=None):
+        """載入 zone CSV 檔案
+
+        Args:
+            zone_csv_path (str): zone CSV 檔案路徑，若為 None 則自動推測路徑
+        """
+        if zone_csv_path:
+            self.zone_csv_path = zone_csv_path
+        elif not self.zone_csv_path:
+            # 自動推測路徑：從 p_addr 的目錄找 zone.csv
+            import os
+            addr_dir = os.path.dirname(self.p_addr)
+            self.zone_csv_path = os.path.join(addr_dir, 'zone.csv')
+
+        try:
+            import os
+            if not os.path.exists(self.zone_csv_path):
+                logging.info(f'未找到 zone CSV 檔案: {self.zone_csv_path}')
+                self.zone_data = {}
+                return
+
+            df_zone = pd.read_csv(self.zone_csv_path, dtype=str)
+            logging.info(f'載入 zone CSV: {self.zone_csv_path} (共 {len(df_zone)} 筆)')
+
+            # 標準化欄位名稱
+            df_zone.columns = [c.strip().lower() for c in df_zone.columns]
+
+            # 檢查必要欄位
+            if 'addressid' not in df_zone.columns:
+                logging.warning(f'zone CSV 缺少 addressid 欄位')
+                self.zone_data = {}
+                return
+
+            # 如果有 zone_name 欄位，按分組處理
+            if 'zone_name' in df_zone.columns:
+                self.zone_data = {}
+                for zone_name, group in df_zone.groupby('zone_name'):
+                    addressids = group['addressid'].str.strip().tolist()
+                    self.zone_data[str(zone_name).strip()] = addressids
+                logging.info(f'載入 {len(self.zone_data)} 個 zone 分組')
+            else:
+                # 沒有分組，所有 addressid 視為一個 zone
+                addressids = df_zone['addressid'].str.strip().tolist()
+                self.zone_data = {'default_zone': addressids}
+                logging.info(f'載入單一 zone (共 {len(addressids)} 個 addressid)')
+
+        except Exception as e:
+            logging.warning(f'載入 zone CSV 失敗: {e}')
+            self.zone_data = {}
 
     def preprocess_address(self):
         """預處理地址資料"""
@@ -408,8 +660,12 @@ class PlotterBase:
         return getattr(self, "figure", None)
 
     def get_base_image(self):
-        """回傳 PIL Image（第一圖層）"""
+        """回傳 PIL Image（第一圖層 - 原始底圖）"""
         return getattr(self, "base_image", None)
+
+    def get_overlay_image(self):
+        """回傳 PIL Image（第二圖層 - 純方框圖層，背景透明）"""
+        return getattr(self, "overlay_image", None)
     
     def _draw_address_points(self, ax, df_addr, x_dict, y_dict, *args, **kwargs):
         """

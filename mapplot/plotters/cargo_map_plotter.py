@@ -14,11 +14,10 @@ plt.rcParams['font.sans-serif'] = ['Microsoft YaHei', 'Arial Unicode MS', 'DejaV
 plt.rcParams['axes.unicode_minus'] = False
 from ..base.plotter_base import PlotterBase
 from ..utils.visualization import (
-    setup_figure, 
-    draw_square, 
-    draw_obstacle_line, 
-    draw_arrow, 
-    finalize_plot
+    setup_figure,
+    draw_square,
+    draw_obstacle_line,
+    draw_arrow
 )
 
 
@@ -33,59 +32,63 @@ class CargoMapPlotter(PlotterBase):
         self.drawn_sections = set()  # 用於追蹤已繪製的路段
 
     def plot(self, ax):
-        """繪製貨物地圖"""
+        """繪製貨物地圖(使用傳入的 ax,不要建立新的 fig/ax)"""
         df_addr = self.df_addr
         x_dict = self.x_dict
         y_dict = self.y_dict
 
-        # 設定繪圖視窗大小
-        fig_width = max(x_dict.values()) / 10
-        fig_height = max(y_dict.values()) / 10
-        fig, ax = plt.subplots(figsize=(fig_width, fig_height))
-        
+        # 如果需要調整整體圖尺寸,可設定傳入 ax 的 figure size
+        try:
+            fig_width = max(x_dict.values()) / 10
+            fig_height = max(y_dict.values()) / 10
+            # 設定傳入 figure 的大小(單位: inches)
+            ax.figure.set_size_inches(max(6, fig_width), max(4, fig_height))
+        except Exception:
+            pass  # 若計算失敗則使用預設大小
+
         # 繪圖參數
         square_side_length = 2
         x_offset_text = 0
         y_offset_text = -3
         text_y = {}
-        
+
         # 障礙物線條參數
         obs_line_l = square_side_length
         obs_line_offset = 1 * square_side_length
         obs_line_w = 3
         obs_color = 'silver'
-        
+
         # 箭頭參數
         arrow_head_width = 1
         arrow_line_width = .006
         arrow_offset = square_side_length/2 + 0.3
         arrow_l = 1.5
 
-        # 繪製每個地址點
+        # 使用傳入的 ax 繪製所有元素
         self._draw_address_points(
-            ax, df_addr, x_dict, y_dict, 
-            square_side_length, x_offset_text, y_offset_text, 
-            text_y, obs_line_l, obs_line_offset, obs_line_w, 
-            obs_color, arrow_head_width, arrow_line_width, 
+            ax, df_addr, x_dict, y_dict,
+            square_side_length, x_offset_text, y_offset_text,
+            text_y, obs_line_l, obs_line_offset, obs_line_w,
+            obs_color, arrow_head_width, arrow_line_width,
             arrow_offset, arrow_l
         )
 
         # 繪製路段
         # self._draw_sections(
-        #     ax, square_side_length, arrow_l, 
+        #     ax, square_side_length, arrow_l,
         #     arrow_head_width, arrow_line_width
         # )
-        
+
         # 繪製貨物方向
         self._draw_cargo_directions(ax, square_side_length)
-        
+
         # 繪製異常元素的驚嘆號
         if self.invalid_address_ids or self.invalid_section_ids:
             self.draw_invalid_elements(ax)
             logging.info(f'已在地圖上標示 {len(self.invalid_address_ids)} 個異常地址和 {len(self.invalid_section_ids)} 個異常路段')
 
-        # 完成繪圖
-        finalize_plot(self.save_path, 'cargo_map_plot_validation.png')
+        # 不要在這裡呼叫 finalize_plot()(UI 會決定是否儲存或顯示)
+        # 也不要建立新的 fig/ax(改為使用 PlotterBase.execute 建的 figure)
 
     def _draw_address_points(
         self, ax, df_addr, x_dict, y_dict, 

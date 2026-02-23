@@ -9,13 +9,13 @@ import os
 import logging
 import json
 from datetime import datetime
-import io
 from PIL import Image
 from PIL import ImageTk
 
 from mapplot.plotters.vehicle_map_plotter import VehicleMapPlotter
 from mapplot.plotters.cargo_map_plotter import CargoMapPlotter
 from mapplot.utils.file_utils import validate_data_folder, load_map_data, load_and_validate_map_data
+from mapplot.utils.data_cache import get_data_cache
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))  # 取得 ui\map_plot_ui.py 所在目錄
 DATA_ROOT = os.path.abspath(os.path.join(PROJECT_ROOT, "..", "data"))
@@ -93,10 +93,18 @@ class MapPlotUI:
         self._create_widgets()
         self._layout_widgets()
         self._setup_logging()  # 設定日誌 (在 UI 元件建立之後，這樣才能正確顯示日誌)
-        
+
         # 根據配置設定 UI 狀態
         self._apply_config_to_ui()
+
+        # 初始化數據緩存
+        self._data_cache = get_data_cache()
         
+        # 預載所有樓層的底圖（使用後台線程異步加載）
+        self._floor_cache = {}  # 儲存每個樓層的資料：{floor_label: {plotter, base_img, overlay_img, map_data, ...}}
+        self._floor_loading_status = {}  # 儲存各樓層的加載狀態
+        self._start_async_preload()
+
         self.root.protocol("WM_DELETE_WINDOW", self._on_closing)  # 關閉視窗時保存配置
         self.root.mainloop()
         
@@ -132,30 +140,131 @@ class MapPlotUI:
         self._create_status_frames()
 
     def _create_status_frames(self):
-        """建立警報與異常顯示區域"""
-        # 建立框架容器
-        self.status_frame = ttk.Frame(self.root)
-        
+        """建立UI框架結構"""
+        # === 建立主容器 ===
+        self.main_container = ttk.Frame(self.root)
+
+        # === 上方區塊 ===
+        self.top_frame = ttk.Frame(self.main_container, height=30)
+
+        # 狀態欄
+        self.status_label = ttk.Label(self.top_frame, text="就緒", relief=tk.SUNKEN, anchor=tk.W)
+        self.status_label.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5, pady=5)
+
+        # 匯出按鈕
+        self.export_btn = ttk.Button(self.top_frame, text="匯出圖片", command=self._export_canvas_image)
+        self.export_btn.pack(side=tk.RIGHT, padx=5, pady=5)
+
+        # 進度條
+        self.progress_bar = ttk.Progressbar(self.top_frame, mode='determinate', length=200)
+        self.progress_bar.pack(side=tk.RIGHT, padx=5, pady=5)
+
+        # === 下方區塊 ===
+        self.bottom_frame = ttk.Frame(self.main_container)
+
+        # 下方區塊分為三列：左側(2) 中間(6) 右側(2)
+        self.left_panel = ttk.LabelFrame(self.bottom_frame, text="日期篩選")
+        self.center_panel = ttk.Frame(self.bottom_frame)
+        self.right_panel = ttk.LabelFrame(self.bottom_frame, text="打滑次數排名")
+
+        # === 右側面板：當前樓層打滑次數排名 ===
+        self._skid_floor_label = ttk.Label(self.right_panel, text="請點選樓層按鈕")
+        self._skid_floor_label.pack(pady=(5, 2), padx=5, anchor="w")
+
+        _skid_frame = ttk.Frame(self.right_panel)
+        _skid_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        self.skid_rank_tree = ttk.Treeview(
+            _skid_frame,
+            columns=("rank", "vehicle", "count"),
+            show="headings",
+            selectmode="none"
+        )
+        self.skid_rank_tree.heading("rank", text="名次")
+        self.skid_rank_tree.heading("vehicle", text="車號")
+        self.skid_rank_tree.heading("count", text="次數")
+        self.skid_rank_tree.column("rank", width=40, anchor="center", stretch=False)
+        self.skid_rank_tree.column("vehicle", width=55, anchor="center", stretch=False)
+        self.skid_rank_tree.column("count", width=45, anchor="center", stretch=False)
+
+        _skid_sb = ttk.Scrollbar(_skid_frame, orient=tk.VERTICAL, command=self.skid_rank_tree.yview)
+        self.skid_rank_tree.config(yscrollcommand=_skid_sb.set)
+        self.skid_rank_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        _skid_sb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # === 左側面板：日期選擇控件 ===
+        # 標籤
+        date_label = ttk.Label(self.left_panel, text="選擇日期:")
+        date_label.pack(pady=(5, 2), padx=5, anchor="w")
+
+        # 創建一個可滾動的框架來容納 checkbox
+        # 外框架
+        self.date_canvas = tk.Canvas(self.left_panel, borderwidth=0, highlightthickness=0, width=150)
+        date_scrollbar = ttk.Scrollbar(self.left_panel, orient=tk.VERTICAL, command=self.date_canvas.yview)
+        self.date_checkbox_frame = ttk.Frame(self.date_canvas)
+
+        # 將內部框架嵌入到 canvas 中
+        self.date_canvas_window = self.date_canvas.create_window((0, 0), window=self.date_checkbox_frame, anchor="nw")
+
+        # 配置滾動
+        self.date_canvas.configure(yscrollcommand=date_scrollbar.set)
+
+        # 佈局
+        self.date_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(5, 0), pady=5)
+        date_scrollbar.pack(side=tk.RIGHT, fill=tk.Y, pady=5)
+
+        # 綁定框架大小變化事件
+        self.date_checkbox_frame.bind("<Configure>", self._on_date_frame_configure)
+        self.date_canvas.bind("<Configure>", self._on_date_canvas_configure)
+
+        # 綁定滑鼠滾輪事件
+        self.date_canvas.bind("<MouseWheel>", self._on_date_list_mousewheel)  # Windows/Mac
+        self.date_canvas.bind("<Button-4>", self._on_date_list_mousewheel)    # Linux scroll up
+        self.date_canvas.bind("<Button-5>", self._on_date_list_mousewheel)    # Linux scroll down
+
+        # 儲存 checkbox 變數的字典：{date_string: IntVar}
+        self.date_checkboxes = {}
+
+        # 按鈕框架
+        date_btn_frame = ttk.Frame(self.left_panel)
+        date_btn_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        # 全選按鈕
+        select_all_btn = ttk.Button(date_btn_frame, text="全選", width=5, command=self._select_all_dates)
+        select_all_btn.pack(side=tk.LEFT, padx=1)
+
+        # 清除選擇按鈕
+        clear_sel_btn = ttk.Button(date_btn_frame, text="清除", width=5, command=self._clear_date_selection)
+        clear_sel_btn.pack(side=tk.LEFT, padx=1)
+
+        # 重新載入按鈕
+        reload_btn = ttk.Button(date_btn_frame, text="重載", width=5, command=self._reload_highlights)
+        reload_btn.pack(side=tk.LEFT, padx=1)
+
+        # === 中間面板包含原有的所有功能 ===
+        # 建立框架容器（原 status_frame）
+        self.status_frame = ttk.Frame(self.center_panel)
+
         # 建立警報區域
         self.warning_frame = ttk.LabelFrame(self.status_frame, text="警報資訊")
-        self.warning_text = tk.Text(self.warning_frame, width=40, height=5, wrap=tk.WORD, 
+        self.warning_text = tk.Text(self.warning_frame, width=40, height=5, wrap=tk.WORD,
                                    background="#FFFFCC", foreground="#CC6600")
-        self.warning_scrollbar = ttk.Scrollbar(self.warning_frame, orient=tk.VERTICAL, 
+        self.warning_scrollbar = ttk.Scrollbar(self.warning_frame, orient=tk.VERTICAL,
                                            command=self.warning_text.yview)
         self.warning_text.config(yscrollcommand=self.warning_scrollbar.set)
-        
+
         # 建立異常區域
         self.error_frame = ttk.LabelFrame(self.status_frame, text="異常資訊")
-        self.error_text = tk.Text(self.error_frame, width=40, height=5, wrap=tk.WORD, 
+        self.error_text = tk.Text(self.error_frame, width=40, height=5, wrap=tk.WORD,
                                 background="#FFCCCC", foreground="#990000")
-        self.error_scrollbar = ttk.Scrollbar(self.error_frame, orient=tk.VERTICAL, 
+        self.error_scrollbar = ttk.Scrollbar(self.error_frame, orient=tk.VERTICAL,
                                          command=self.error_text.yview)
         self.error_text.config(yscrollcommand=self.error_scrollbar.set)
-        
+
         # 設定唯讀狀態
         self.warning_text.config(state=tk.DISABLED)
         self.error_text.config(state=tk.DISABLED)
-        
+
         # 建立畫布專用框架
         self.canvas_frame = ttk.Frame(self.status_frame)
 
@@ -344,53 +453,46 @@ class MapPlotUI:
             self.vehicle_map_plotter.set_show_address_id(self.show_address_id.get() == '1')
 
             # highlight list — 請確保型態與 df_addr['AddressId'] 一致
-            highlight_ids = ['106508700', ' 103505600']
-            highlight_ids = [int(str(i).strip()) for i in highlight_ids]
-            self.vehicle_map_plotter.set_highlight_address_ids(highlight_ids)
+            #highlight_ids = ['106508700', ' 103505600']
+            #highlight_ids = [int(str(i).strip()) for i in highlight_ids]
+            #self.vehicle_map_plotter.set_highlight_address_ids(highlight_ids)
 
             # 範例：要高亮的 sectionId（請依你的 df_section['SectionId'] 型態調整）
-            highlight_section_ids = ['10389', '10471']  # <-- 改成你要的 sectionId list
+            #highlight_section_ids = ['10389', '10471']  # <-- 改成你要的 sectionId list
             # 轉型（若 SectionId 為整數）
-            try:
-                highlight_section_ids = [int(str(s).strip()) for s in highlight_section_ids]
-            except Exception:
+            #try:
+                #highlight_section_ids = [int(str(s).strip()) for s in highlight_section_ids]
+           # except Exception:
                 # 若 SectionId 為字串就保留原樣
-                highlight_section_ids = [str(s).strip() for s in highlight_section_ids]
-            self.vehicle_map_plotter.set_highlight_section_ids(highlight_section_ids)
+                #highlight_section_ids = [str(s).strip() for s in highlight_section_ids]
+            #self.vehicle_map_plotter.set_highlight_section_ids(highlight_section_ids)
 
                 # 執行繪圖（PlotterBase.execute 會建立 figure 並在該 figure 上繪製）
             self.vehicle_map_plotter.load()
             self.vehicle_map_plotter.execute()
 
-            # 取得第一圖層（PIL Image）
-            base_pil = self.vehicle_map_plotter.get_base_image()
-            # 取得第二圖層（matplotlib Figure -> PIL Image）
-            fig = self.vehicle_map_plotter.get_figure()
-            overlay_pil = None
-            if fig is not None:
-                buf = io.BytesIO()
-                fig.savefig(buf, format='png', bbox_inches='tight')
-                buf.seek(0)
-                overlay_pil = Image.open(buf).convert("RGBA").copy()
-                buf.close()
+            # 取得第一圖層（原始底圖）
+            self._base_pil_img = self.vehicle_map_plotter.get_base_image()
+            # 取得第二圖層（純方框圖層，透明背景）
+            self._overlay_pil_img = self.vehicle_map_plotter.get_overlay_image()
 
-            # 儲存於 UI instance 以便在按鈕切換時使用
-            self._base_pil_img = base_pil if base_pil is not None else overlay_pil
-            self._overlay_pil_img = overlay_pil if overlay_pil is not None else self._base_pil_img
+            # 建立合成圖（底圖 + 方框）
+            if self._base_pil_img and self._overlay_pil_img:
+                # 確保兩個圖層尺寸一致
+                if self._base_pil_img.size != self._overlay_pil_img.size:
+                    # 調整 overlay 尺寸以匹配 base
+                    self._overlay_pil_img = self._overlay_pil_img.resize(self._base_pil_img.size, Image.LANCZOS)
 
-            # 建立切換按鈕（只建立一次）
-            if not hasattr(self, "_show_base_btn"):
-                self._show_base_btn = tk.Button(self.canvas_frame, text="原始圖", width=8,
-                                               command=lambda: self.show_image_on_canvas(self._base_pil_img))
-                self._show_highlight_btn = tk.Button(self.canvas_frame, text="加框圖", width=8,
-                                                     command=lambda: self.show_image_on_canvas(self._overlay_pil_img))
-                # 放在 canvas_frame 的第 2 行（canvas 與 scrollbars 已佔用 row0,row1）
-                self._show_base_btn.grid(row=2, column=0, sticky="w", pady=5, padx=5)
-                self._show_highlight_btn.grid(row=2, column=1, sticky="w", pady=5, padx=5)
+                # 合成圖層：底圖 + 方框
+                self._combined_pil_img = Image.new("RGBA", self._base_pil_img.size)
+                self._combined_pil_img.paste(self._base_pil_img, (0, 0))
+                self._combined_pil_img.paste(self._overlay_pil_img, (0, 0), self._overlay_pil_img)
+            else:
+                self._combined_pil_img = self._base_pil_img
 
-            # 預設顯示 overlay（加框圖）
-            if self._overlay_pil_img:
-                self.show_image_on_canvas(self._overlay_pil_img)
+            # 預設顯示合成圖（加框圖）
+            if self._combined_pil_img:
+                self.show_image_on_canvas(self._combined_pil_img)
             elif self._base_pil_img:
                 self.show_image_on_canvas(self._base_pil_img)
 
@@ -403,39 +505,99 @@ class MapPlotUI:
             logging.error(f"錯誤: {str(e)} | 檔案: {filename} | 行數: {line} | 類型: {type(e).__name__}")
             messagebox.showerror("錯誤", f"繪製車輛地圖時發生錯誤: {str(e)}")
     
+    def _toggle_vehicle_highlight(self):
+        """切換車輛地圖的高亮方框顯示"""
+        if self._show_highlight_var.get() == 1:
+            # 勾選：顯示合成圖（底圖 + 方框）
+            if hasattr(self, '_combined_pil_img') and self._combined_pil_img:
+                self.show_image_on_canvas(self._combined_pil_img)
+        else:
+            # 取消勾選：只顯示底圖
+            if hasattr(self, '_base_pil_img') and self._base_pil_img:
+                self.show_image_on_canvas(self._base_pil_img)
+
     def plot_cargo_map(self):
-        """繪製貨物地圖"""
+        """繪製貨物地圖(支援顯示原始圖與加框圖兩圖層切換)"""
         try:
             if not self.data_folder:
                 raise ValueError("請先選擇包含必要檔案的資料夾")
-                
+
             # 從已載入的地圖資料中獲取無效 ID
             invalid_address_ids = set()
             invalid_section_ids = set()
-            
+
             # 從驗證結果中直接獲取無效 ID
             if hasattr(self, 'map_data'):
                 if 'invalid_cargo_address_ids' in self.map_data:
                     invalid_address_ids = self.map_data['invalid_cargo_address_ids']
                 if 'invalid_cargo_section_ids' in self.map_data:
                     invalid_section_ids = self.map_data['invalid_cargo_section_ids']
-            
+
             # 設定繪圖器的異常 ID
             if invalid_address_ids or invalid_section_ids:
-                this.cargo_map_plotter.set_invalid_ids(invalid_address_ids, invalid_section_ids)
+                self.cargo_map_plotter.set_invalid_ids(invalid_address_ids, invalid_section_ids)
                 logging.info(f"已標記 {len(invalid_address_ids)} 個異常地址和 {len(invalid_section_ids)} 個異常路段")
-                
-            this.cargo_map_plotter.load()
-            this.cargo_map_plotter.execute()
+
+            # 執行繪圖(PlotterBase.execute 會建立 figure 並在該 figure 上繪製)
+            self.cargo_map_plotter.load()
+            self.cargo_map_plotter.execute()
+
+            # 取得第一圖層（原始底圖）
+            self._cargo_base_pil_img = self.cargo_map_plotter.get_base_image()
+            # 取得第二圖層（純方框圖層，透明背景）
+            self._cargo_overlay_pil_img = self.cargo_map_plotter.get_overlay_image()
+
+            # 建立合成圖（底圖 + 方框）
+            if self._cargo_base_pil_img and self._cargo_overlay_pil_img:
+                # 確保兩個圖層尺寸一致
+                if self._cargo_base_pil_img.size != self._cargo_overlay_pil_img.size:
+                    # 調整 overlay 尺寸以匹配 base
+                    self._cargo_overlay_pil_img = self._cargo_overlay_pil_img.resize(self._cargo_base_pil_img.size, Image.LANCZOS)
+
+                # 合成圖層：底圖 + 方框
+                self._cargo_combined_pil_img = Image.new("RGBA", self._cargo_base_pil_img.size)
+                self._cargo_combined_pil_img.paste(self._cargo_base_pil_img, (0, 0))
+                self._cargo_combined_pil_img.paste(self._cargo_overlay_pil_img, (0, 0), self._cargo_overlay_pil_img)
+            else:
+                self._cargo_combined_pil_img = self._cargo_base_pil_img
+
+            # 建立圖層切換 checkbutton（只建立一次）
+            if not hasattr(self, "_cargo_show_highlight_var"):
+                self._cargo_show_highlight_var = tk.IntVar(value=1)  # 預設勾選，顯示方框
+                self._cargo_show_highlight_check = tk.Checkbutton(
+                    self.canvas_frame,
+                    text="顯示高亮方框",
+                    variable=self._cargo_show_highlight_var,
+                    command=self._toggle_cargo_highlight
+                )
+                # 放在 canvas_frame 的第 2 行
+                self._cargo_show_highlight_check.grid(row=2, column=0, sticky="w", pady=5, padx=5)
+
+            # 預設顯示合成圖（加框圖）
+            if self._cargo_combined_pil_img:
+                self.show_image_on_canvas(self._cargo_combined_pil_img)
+            elif self._cargo_base_pil_img:
+                self.show_image_on_canvas(self._cargo_base_pil_img)
+
             logging.info("貨物地圖繪製完成")
-            messagebox.showinfo("成功", "貨物地圖繪製完成")
-            
+
         except Exception as e:
             import traceback
             tb = traceback.extract_tb(e.__traceback__)
             filename, line, func, text = tb[-1]
             logging.error(f"錯誤: {str(e)} | 檔案: {filename} | 行數: {line} | 類型: {type(e).__name__}")
             messagebox.showerror("錯誤", f"繪製貨物地圖時發生錯誤: {str(e)}")
+
+    def _toggle_cargo_highlight(self):
+        """切換貨物地圖的高亮方框顯示"""
+        if self._cargo_show_highlight_var.get() == 1:
+            # 勾選：顯示合成圖（底圖 + 方框）
+            if hasattr(self, '_cargo_combined_pil_img') and self._cargo_combined_pil_img:
+                self.show_image_on_canvas(self._cargo_combined_pil_img)
+        else:
+            # 取消勾選：只顯示底圖
+            if hasattr(self, '_cargo_base_pil_img') and self._cargo_base_pil_img:
+                self.show_image_on_canvas(self._cargo_base_pil_img)
 
     def _create_checkbutton(self):
         """建立核取方塊"""
@@ -446,6 +608,12 @@ class MapPlotUI:
 
         # 新增顯示 Address ID 的勾選框
         self.show_address_id = tk.StringVar(value='1')     
+        
+        # 新增顯示施工區域的勾選框（預設勾選）
+        self.show_zone = tk.IntVar(value=1)
+        
+        # 新增顯示高亮方框的勾選框（預設勾選）
+        self.show_highlight = tk.IntVar(value=1)
         
     def _apply_config_to_ui(self):
         """將配置檔案應用到 UI 元件"""
@@ -469,8 +637,8 @@ class MapPlotUI:
         if "display_options" in self.config:
             display_opts = self.config["display_options"]
             self.show_section_dist.set('1' if display_opts.get("show_section_distance", False) else '0')
-            this.show_tag_id.set('1' if display_opts.get("show_tag_id", True) else '0')
-            this.show_address_id.set('1' if display_opts.get("show_address_id", True) else '0')
+            self.show_tag_id.set('1' if display_opts.get("show_tag_id", True) else '0')
+            self.show_address_id.set('1' if display_opts.get("show_address_id", True) else '0')
         
     def _save_config(self):
         """儲存目前的配置到檔案"""
@@ -484,8 +652,8 @@ class MapPlotUI:
             if "display_options" not in self.config:
                 self.config["display_options"] = {}
             self.config["display_options"]["show_section_distance"] = self.show_section_dist.get() == '1'
-            this.config["display_options"]["show_tag_id"] = this.show_tag_id.get() == '1'
-            this.config["display_options"]["show_address_id"] = this.show_address_id.get() == '1'
+            self.config["display_options"]["show_tag_id"] = self.show_tag_id.get() == '1'
+            self.config["display_options"]["show_address_id"] = self.show_address_id.get() == '1'
             
             # 寫入檔案
             with open(CONFIG_FILE_PATH, 'w', encoding='utf-8') as f:
@@ -509,17 +677,41 @@ class MapPlotUI:
 
     def _layout_widgets(self):
         """佈局使用者介面元件"""
-        # 按鈕區域移除
-        # for key, button in self.buttons.items():
-        #     button.pack(pady=5)
+        # === 主容器佈局：上下兩個區塊 ===
+        self.main_container.pack(fill=tk.BOTH, expand=True)
 
-        self.status_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        # 上方區塊（固定高度）
+        self.top_frame.pack(fill=tk.X, padx=10, pady=(10, 5))
+
+        # 下方區塊（可擴展）
+        self.bottom_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(5, 10))
+
+        # === 下方區塊的三列佈局：2:6:2 ===
+        # 左側面板（權重 2）
+        self.left_panel.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
+
+        # 中間面板（權重 6）- 包含所有現有功能
+        self.center_panel.grid(row=0, column=1, sticky="nsew", padx=5)
+
+        # 右側面板（權重 2）
+        self.right_panel.grid(row=0, column=2, sticky="nsew", padx=(5, 0))
+
+        # 設定列權重（使其可垂直擴展）
+        self.bottom_frame.rowconfigure(0, weight=1)
+
+        # 設定欄權重（比例 2:6:2）
+        self.bottom_frame.columnconfigure(0, weight=2)
+        self.bottom_frame.columnconfigure(1, weight=6)
+        self.bottom_frame.columnconfigure(2, weight=2)
+
+        # === 中間面板內的原有功能佈局 ===
+        self.status_frame.pack(fill=tk.BOTH, expand=True)
         self.error_frame.pack(fill=tk.X, padx=5, pady=5)
         self.error_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.error_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.error_text.config(height=7)  # 固定高度
 
-        self.canvas_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        self.canvas_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         self.output_canvas.grid(row=0, column=0, sticky="nsew")
         self.canvas_v_scrollbar.grid(row=0, column=1, sticky="ns")
         self.canvas_h_scrollbar.grid(row=1, column=0, sticky="ew")
@@ -743,6 +935,565 @@ class MapPlotUI:
             logging.warning(f"讀取 highlights CSV 失敗: {e}")
             self.highlight_log_df = None
 
+    def _load_zone_for_floor(self, folder_path):
+        """載入樓層的施工區域資料並產生圖層
+
+        Args:
+            folder_path: 樓層資料夾路徑
+
+        Returns:
+            PIL Image or None: 施工區域圖層（透明背景）
+        """
+        import pandas as pd
+        import io
+
+        zone_csv_path = os.path.join(folder_path, 'zone.csv')
+        if not os.path.exists(zone_csv_path):
+            logging.info(f"未找到 zone.csv: {zone_csv_path}")
+            return None
+
+        try:
+            # 讀取 zone.csv
+            df_zone = pd.read_csv(zone_csv_path, dtype=str)
+            logging.info(f"載入 zone CSV: {zone_csv_path} (共 {len(df_zone)} 筆)")
+
+            # 獲取 AddressId 欄位
+            if 'AddressId' not in df_zone.columns:
+                logging.warning(f"zone CSV 缺少 AddressId 欄位")
+                return None
+
+            # 標準化欄位名稱（大小寫不敏感）
+            df_zone.columns = [c.strip() for c in df_zone.columns]
+            
+            # 檢查是否有 zone_name 欄位
+            has_zone_name = 'zone_name' in [c.lower() for c in df_zone.columns]
+            
+            # 標準化 zone_name 欄位名稱
+            if has_zone_name:
+                for c in df_zone.columns:
+                    if c.lower() == 'zone_name':
+                        df_zone['zone_name'] = df_zone[c].astype(str).str.strip()
+                        break
+            
+            addressids = df_zone['AddressId'].str.strip().tolist()
+            if not addressids:
+                logging.warning("zone CSV 沒有有效的 addressid")
+                return None
+
+            logging.info(f"找到 {len(addressids)} 個施工位置")
+
+            # 獲取 plotter 的座標字典
+            if not hasattr(self, 'vehicle_map_plotter') or self.vehicle_map_plotter is None:
+                return None
+
+            x_dict = getattr(self.vehicle_map_plotter, 'x_dict', {})
+            y_dict = getattr(self.vehicle_map_plotter, 'y_dict', {})
+
+            if not x_dict or not y_dict:
+                logging.warning("vehicle_map_plotter 沒有座標資料")
+                return None
+
+            # 建立透明圖層繪製 zone 方框
+            import matplotlib.pyplot as plt
+
+            # 獲取 figure 尺寸
+            fig_size = (10, 8)  # 預設尺寸
+            if hasattr(self.vehicle_map_plotter, 'figure') and self.vehicle_map_plotter.figure:
+                fig_size = self.vehicle_map_plotter.figure.get_size_inches()
+
+            # 建立透明 figure
+            zone_fig, zone_ax = plt.subplots(figsize=fig_size)
+
+            # 設定座標範圍（從 plotter 獲取）
+            if hasattr(self.vehicle_map_plotter, 'figure') and self.vehicle_map_plotter.figure.axes:
+                orig_ax = self.vehicle_map_plotter.figure.axes[0]
+                zone_ax.set_xlim(orig_ax.get_xlim())
+                zone_ax.set_ylim(orig_ax.get_ylim())
+                zone_ax.set_aspect(orig_ax.get_aspect())
+
+            # 隱藏座標軸
+            zone_ax.set_axis_off()
+            zone_ax.tick_params(left=False, labelleft=False, bottom=False, labelbottom=False)
+            for spine in zone_ax.spines.values():
+                spine.set_visible(False)
+
+            # 繪製淡藍色方框
+            from matplotlib.patches import Rectangle
+            
+            # 根據是否有 zone_name 來決定繪製方式
+            if has_zone_name and 'zone_name' in df_zone.columns:
+                # 按 zone_name 分組，每個分組畫一個大框
+                logging.info(f"按 zone_name 分組繪製施工區域")
+                
+                for zone_name, group in df_zone.groupby('zone_name'):
+                    # 收集該 zone 的所有座標
+                    coords = []
+                    valid_addressids = []
+                    
+                    for addr_id in group['AddressId']:
+                        addr_id_str = str(addr_id).strip()
+                        try:
+                            ax = int(addr_id_str[1:4])
+                            ay = int(addr_id_str[4:7])
+                            key = (ax, ay)
+                            
+                            if key in x_dict and key in y_dict:
+                                coords.append((x_dict[key], y_dict[key]))
+                                valid_addressids.append(addr_id_str)
+                        except Exception:
+                            continue
+                    
+                    if not coords:
+                        logging.warning(f"Zone '{zone_name}' 沒有有效的座標")
+                        continue
+                    
+                    # 計算 bounding box
+                    xs = [c[0] for c in coords]
+                    ys = [c[1] for c in coords]
+                    xmin, xmax = min(xs), max(xs)
+                    ymin, ymax = min(ys), max(ys)
+                    
+                    # 加上 padding
+                    padding = 6.0
+                    xmin -= padding
+                    ymin -= padding
+                    width = (xmax - xmin) + 2 * padding
+                    height = (ymax - ymin) + 2 * padding
+                    
+                    # 繪製該 zone 的方框
+                    zone_rect = Rectangle(
+                        (xmin, ymin), width, height,
+                        linewidth=5,
+                        edgecolor='skyblue',
+                        facecolor='skyblue',
+                        alpha=0.3,
+                        zorder=5
+                    )
+                    zone_ax.add_patch(zone_rect)
+                    
+                    logging.info(f"繪製 zone '{zone_name}': {len(valid_addressids)} 個 addressid")
+            else:
+                # 沒有 zone_name，對每個 addressID 畫獨立小框
+                logging.info(f"對每個 addressID 繪製獨立施工區域")
+                
+                valid_count = 0
+                for addr_id in addressids:
+                    addr_id_str = str(addr_id).strip()
+                    
+                    try:
+                        ax = int(addr_id_str[1:4])
+                        ay = int(addr_id_str[4:7])
+                        key = (ax, ay)
+                        
+                        if key in x_dict and key in y_dict:
+                            x = x_dict[key]
+                            y = y_dict[key]
+                            
+                            # 每個 addressID 畫一個小方框（以該點為中心）
+                            box_size = 8.0  # 方框大小
+                            half_size = box_size / 2
+                            
+                            zone_rect = Rectangle(
+                                (x - half_size, y - half_size), box_size, box_size,
+                                linewidth=3,
+                                edgecolor='skyblue',
+                                facecolor='skyblue',
+                                alpha=0.5,
+                                zorder=5
+                            )
+                            zone_ax.add_patch(zone_rect)
+                            valid_count += 1
+                    except Exception:
+                        continue
+                
+                logging.info(f"繪製了 {valid_count} 個施工區域框")
+
+            # 保存為圖像
+            buf = io.BytesIO()
+            zone_fig.savefig(buf, format='png', bbox_inches='tight', pad_inches=0,
+                           facecolor='none', transparent=True)
+            buf.seek(0)
+            zone_img = Image.open(buf).convert("RGBA").copy()
+            buf.close()
+
+            plt.close(zone_fig)
+
+            logging.info(f"施工區域圖層已建立")
+            return zone_img
+
+        except Exception as e:
+            logging.error(f"建立施工區域圖層失敗: {e}")
+            return None
+
+    def _load_zone_section_for_floor(self, folder_path):
+        """載入樓層的施工區域路段資料並產生圖層
+
+        Args:
+            folder_path: 樓層資料夾路徑
+
+        Returns:
+            PIL Image or None: 施工區域路段圖層（透明背景）
+        """
+        import pandas as pd
+        import io
+
+        zone_section_csv_path = os.path.join(folder_path, 'zoneSection.csv')
+        if not os.path.exists(zone_section_csv_path):
+            logging.info(f"未找到 zoneSection.csv: {zone_section_csv_path}")
+            return None
+
+        try:
+            # 讀取 zoneSection.csv
+            df_zone_section = pd.read_csv(zone_section_csv_path, dtype=str)
+            logging.info(f"載入 zoneSection CSV: {zone_section_csv_path} (共 {len(df_zone_section)} 筆)")
+
+            # 獲取必要欄位
+            if 'SectionId' not in df_zone_section.columns:
+                logging.warning(f"zoneSection CSV 缺少 SectionId 欄位")
+                return None
+
+            if 'FromAddressId' not in df_zone_section.columns or 'ToAddressId' not in df_zone_section.columns:
+                logging.warning(f"zoneSection CSV 缺少 FromAddressId 或 ToAddressId 欄位")
+                return None
+
+            # 標準化欄位名稱（大小寫不敏感）
+            df_zone_section.columns = [c.strip() for c in df_zone_section.columns]
+            
+            # 檢查是否有 zone_name 欄位
+            has_zone_name = 'zone_name' in [c.lower() for c in df_zone_section.columns]
+            
+            # 標準化 zone_name 欄位名稱
+            if has_zone_name:
+                for c in df_zone_section.columns:
+                    if c.lower() == 'zone_name':
+                        df_zone_section['zone_name'] = df_zone_section[c].astype(str).str.strip()
+                        break
+            
+            # 獲取路段資料
+            section_ids = df_zone_section['SectionId'].str.strip().tolist()
+            from_addressids = df_zone_section['FromAddressId'].str.strip().tolist()
+            to_addressids = df_zone_section['ToAddressId'].str.strip().tolist()
+            
+            if not section_ids:
+                logging.warning("zoneSection CSV 沒有有效的 section id")
+                return None
+
+            logging.info(f"找到 {len(section_ids)} 個施工路段")
+
+            # 獲取 plotter 的座標字典
+            if not hasattr(self, 'vehicle_map_plotter') or self.vehicle_map_plotter is None:
+                return None
+
+            x_dict = getattr(self.vehicle_map_plotter, 'x_dict', {})
+            y_dict = getattr(self.vehicle_map_plotter, 'y_dict', {})
+
+            if not x_dict or not y_dict:
+                logging.warning("vehicle_map_plotter 沒有座標資料")
+                return None
+
+            # 建立透明圖層繪製 zone section 方框
+            import matplotlib.pyplot as plt
+
+            # 獲取 figure 尺寸
+            fig_size = (10, 8)  # 預設尺寸
+            if hasattr(self.vehicle_map_plotter, 'figure') and self.vehicle_map_plotter.figure:
+                fig_size = self.vehicle_map_plotter.figure.get_size_inches()
+
+            # 建立透明 figure
+            zone_fig, zone_ax = plt.subplots(figsize=fig_size)
+
+            # 設定座標範圍（從 plotter 獲取）
+            if hasattr(self.vehicle_map_plotter, 'figure') and self.vehicle_map_plotter.figure.axes:
+                orig_ax = self.vehicle_map_plotter.figure.axes[0]
+                zone_ax.set_xlim(orig_ax.get_xlim())
+                zone_ax.set_ylim(orig_ax.get_ylim())
+                zone_ax.set_aspect(orig_ax.get_aspect())
+
+            # 隱藏座標軸
+            zone_ax.set_axis_off()
+            zone_ax.tick_params(left=False, labelleft=False, bottom=False, labelbottom=False)
+            for spine in zone_ax.spines.values():
+                spine.set_visible(False)
+
+            # 繪製淡藍色路段方框
+            from matplotlib.patches import Rectangle, FancyArrowPatch
+            import matplotlib.patches as mpatches
+            
+            # 根據是否有 zone_name 來決定繪製方式
+            if has_zone_name and 'zone_name' in df_zone_section.columns:
+                # 按 zone_name 分組，每個分組畫一個大框
+                logging.info(f"按 zone_name 分組繪製施工路段區域")
+                
+                for zone_name, group in df_zone_section.groupby('zone_name'):
+                    # 收集該 zone 的所有路段座標
+                    coords = []
+                    valid_sections = []
+                    
+                    for idx, row in group.iterrows():
+                        from_addr = str(row['FromAddressId']).strip()
+                        to_addr = str(row['ToAddressId']).strip()
+                        
+                        try:
+                            from_ax = int(from_addr[1:4])
+                            from_ay = int(from_addr[4:7])
+                            to_ax = int(to_addr[1:4])
+                            to_ay = int(to_addr[4:7])
+                            
+                            from_key = (from_ax, from_ay)
+                            to_key = (to_ax, to_ay)
+                            
+                            if from_key in x_dict and from_key in y_dict and to_key in x_dict and to_key in y_dict:
+                                coords.append((x_dict[from_key], y_dict[from_key]))
+                                coords.append((x_dict[to_key], y_dict[to_key]))
+                                valid_sections.append(str(row['SectionId']).strip())
+                        except Exception:
+                            continue
+                    
+                    if not coords:
+                        logging.warning(f"Zone '{zone_name}' 沒有有效的路段座標")
+                        continue
+                    
+                    # 計算 bounding box
+                    xs = [c[0] for c in coords]
+                    ys = [c[1] for c in coords]
+                    xmin, xmax = min(xs), max(xs)
+                    ymin, ymax = min(ys), max(ys)
+                    
+                    # 加上 padding
+                    padding = 6.0
+                    xmin -= padding
+                    ymin -= padding
+                    width = (xmax - xmin) + 2 * padding
+                    height = (ymax - ymin) + 2 * padding
+                    
+                    # 繪製該 zone 的方框
+                    zone_rect = Rectangle(
+                        (xmin, ymin), width, height,
+                        linewidth=5,
+                        edgecolor='skyblue',
+                        facecolor='skyblue',
+                        alpha=0.3,
+                        zorder=5
+                    )
+                    zone_ax.add_patch(zone_rect)
+                    
+                    logging.info(f"繪製 zone '{zone_name}': {len(valid_sections)} 個路段")
+            else:
+                # 沒有 zone_name，對每個路段畫獨立小框
+                logging.info(f"對每個路段繪製獨立施工區域")
+                
+                valid_count = 0
+                for idx, row in df_zone_section.iterrows():
+                    from_addr = str(row['FromAddressId']).strip()
+                    to_addr = str(row['ToAddressId']).strip()
+                    section_id = str(row['SectionId']).strip()
+                    
+                    try:
+                        from_ax = int(from_addr[1:4])
+                        from_ay = int(from_addr[4:7])
+                        to_ax = int(to_addr[1:4])
+                        to_ay = int(to_addr[4:7])
+                        
+                        from_key = (from_ax, from_ay)
+                        to_key = (to_ax, to_ay)
+                        
+                        if from_key in x_dict and from_key in y_dict and to_key in x_dict and to_key in y_dict:
+                            from_x = x_dict[from_key]
+                            from_y = y_dict[from_key]
+                            to_x = x_dict[to_key]
+                            to_y = y_dict[to_key]
+                            
+                            # 計算路段的中點和寬度
+                            mid_x = (from_x + to_x) / 2
+                            mid_y = (from_y + to_y) / 2
+                            
+                            # 計算路段的 bounding box
+                            xmin = min(from_x, to_x)
+                            xmax = max(from_x, to_x)
+                            ymin = min(from_y, to_y)
+                            ymax = max(from_y, to_y)
+                            
+                            # 加上 padding
+                            padding = 2.0
+                            xmin -= padding
+                            ymin -= padding
+                            width = (xmax - xmin) + 2 * padding
+                            height = (ymax - ymin) + 2 * padding
+                            
+                            # 確保最小尺寸
+                            if width < 4:
+                                width = 4
+                            if height < 4:
+                                height = 4
+                            
+                            # 繪製路段方框
+                            zone_rect = Rectangle(
+                                (xmin, ymin), width, height,
+                                linewidth=3,
+                                edgecolor='skyblue',
+                                facecolor='skyblue',
+                                alpha=0.5,
+                                zorder=5
+                            )
+                            zone_ax.add_patch(zone_rect)
+                            valid_count += 1
+                    except Exception:
+                        continue
+                
+                logging.info(f"繪製了 {valid_count} 個施工路段框")
+
+            # 保存為圖像
+            buf = io.BytesIO()
+            zone_fig.savefig(buf, format='png', bbox_inches='tight', pad_inches=0,
+                           facecolor='none', transparent=True)
+            buf.seek(0)
+            zone_img = Image.open(buf).convert("RGBA").copy()
+            buf.close()
+
+            plt.close(zone_fig)
+
+            logging.info(f"施工路段區域圖層已建立")
+            return zone_img
+
+        except Exception as e:
+            logging.error(f"建立施工路段區域圖層失敗: {e}")
+            return None
+
+    def _start_async_preload(self):
+        """啟動後台線程異步加載所有樓層"""
+        import threading
+
+        # 更新狀態
+        self._update_status("開始預載樓層底圖...")
+        self.progress_bar['value'] = 0
+        self.progress_bar['maximum'] = 3
+
+        # 在後台線程中執行預加載
+        thread = threading.Thread(target=self._preload_floor_maps_async, daemon=True)
+        thread.start()
+
+    def _update_status(self, message):
+        """線程安全地更新狀態欄"""
+        if hasattr(self, 'status_label'):
+            self.root.after(0, lambda: self.status_label.config(text=message))
+
+    def _update_progress(self, value):
+        """線程安全地更新進度條"""
+        if hasattr(self, 'progress_bar'):
+            self.root.after(0, lambda: self.progress_bar.config(value=value))
+
+    def _preload_floor_maps_async(self):
+        """在後台線程中預載所有樓層的底圖（優化版：使用快取 + 跳過驗證）"""
+        import time
+        start_time = time.time()
+        
+        try:
+            logging.info("開始預載所有樓層的底圖...")
+
+            # 預先載入 highlight_log.csv（所有樓層共用）
+            project_root = os.path.abspath(os.path.join(PROJECT_ROOT, ".."))
+            self._load_highlight_log(project_root)
+
+            # 定義三個樓層的資料夾路徑
+            floor_configs = [
+                ("1F", os.path.join(DATA_ROOT, "..", "Map", "Garmin1F")),
+                ("2F", os.path.join(DATA_ROOT, "..", "Map", "Garmin2F")),
+                ("3F", os.path.join(DATA_ROOT, "..", "Map", "Garmin3F")),
+            ]
+
+            loaded_count = 0
+            for floor_label, folder_path in floor_configs:
+                self._update_status(f"正在載入 {floor_label} 底圖...")
+                try:
+                    # 驗證資料夾
+                    is_valid, missing_files = validate_data_folder(folder_path)
+                    if not is_valid:
+                        logging.warning(f"樓層 {floor_label} 資料夾驗證失敗，跳過預載")
+                        self._floor_loading_status[floor_label] = 'failed'
+                        loaded_count += 1
+                        self._update_progress(loaded_count)
+                        continue
+
+                    # 優化：嘗試從快取獲取數據，避免重複讀取 CSV
+                    map_data = None
+                    if hasattr(self, '_data_cache') and self._data_cache:
+                        map_data = self._data_cache.get_cached_data(folder_path)
+                    
+                    if map_data is None:
+                        # 快取未命中，手動讀取 CSV（使用輕量級模式，跳過驗證）
+                        map_files = load_map_data(folder_path)
+                        # 使用 lightweight=True 跳過昂貴的驗證過程
+                        validation_result = load_and_validate_map_data(folder_path, strict=False, lightweight=True)
+                        map_data = validation_result
+                        
+                        # 存入快取
+                        if hasattr(self, '_data_cache') and self._data_cache:
+                            self._data_cache.load_csv_data(folder_path)
+                            self._data_cache.set_validation_result(folder_path, validation_result)
+                    else:
+                        # 快取命中，使用已載入的數據
+                        validation_result = map_data
+                        map_files = load_map_data(folder_path)
+                        logging.info(f"樓層 {floor_label} 使用快取數據")
+
+                    # 創建該樓層專用的 plotter
+                    floor_plotter = VehicleMapPlotter(config=self.config)
+                    floor_plotter.p_addr = map_files['address']
+                    floor_plotter.p_section = map_files['section']
+                    floor_plotter.save_path = map_files['save_path']
+
+                    # 設定異常 ID（從快取的驗證結果）
+                    invalid_address_ids = validation_result.get('invalid_vehicle_address_ids', set()) if validation_result else set()
+                    invalid_section_ids = validation_result.get('invalid_vehicle_section_ids', set()) if validation_result else set()
+                    if invalid_address_ids or invalid_section_ids:
+                        floor_plotter.set_invalid_ids(invalid_address_ids, invalid_section_ids)
+
+                    # 設定顯示選項
+                    floor_plotter.set_show_section_dist(self.show_section_dist.get() == '1')
+                    floor_plotter.set_show_tag_id(self.show_tag_id.get() == '1')
+                    floor_plotter.set_show_address_id(self.show_address_id.get() == '1')
+
+                    # 執行繪圖（生成底圖，但不設定高亮）
+                    floor_plotter.load()
+                    floor_plotter.execute()
+
+                    # 獲取底圖
+                    base_img = floor_plotter.get_base_image()
+
+                    # 儲存到快取
+                    self._floor_cache[floor_label] = {
+                        'plotter': floor_plotter,
+                        'base_img': base_img,
+                        'overlay_img': None,  # 初始沒有高亮
+                        'combined_img': base_img,  # 初始合成圖就是底圖
+                        'map_data': validation_result,
+                        'folder_path': folder_path,
+                    }
+
+                    self._floor_loading_status[floor_label] = 'loaded'
+                    loaded_count += 1
+                    self._update_progress(loaded_count)
+                    logging.info(f"樓層 {floor_label} 底圖預載完成 (尺寸: {base_img.size if base_img else 'N/A'})")
+
+                except Exception as e:
+                    logging.error(f"預載樓層 {floor_label} 失敗: {e}")
+                    self._floor_loading_status[floor_label] = 'failed'
+                    loaded_count += 1
+                    self._update_progress(loaded_count)
+                    continue
+
+            # 全部載入完成
+            elapsed = time.time() - start_time
+            self._update_status(f"就緒 - 已載入 {len(self._floor_cache)}/3 個樓層 ({elapsed:.1f}秒)")
+            logging.info(f"底圖預載完成，共載入 {len(self._floor_cache)} 個樓層，耗時 {elapsed:.1f} 秒")
+
+        except Exception as e:
+            logging.error(f"預載樓層底圖時發生錯誤: {e}")
+            self._update_status(f"預載失敗: {str(e)}")
+        finally:
+            # 重置進度條
+            self.root.after(2000, lambda: self._update_progress(0))
+
     def _floor_from_folder(self, folder_path):
         """
         從資料夾路徑或名稱猜測樓層標籤，回傳 '1F'/'2F'/'3F' 或 None。
@@ -758,6 +1509,169 @@ class MapPlotUI:
         if "3F" in base or "GARMIN3F" in base or "/3F" in p or base.endswith("3F"):
             return "3F"
         return None
+
+    def _export_canvas_image(self):
+        """匯出當前畫布畫面（含圖例），讓使用者選擇儲存位置"""
+        if not hasattr(self, '_base_pil_img') or self._base_pil_img is None:
+            messagebox.showwarning("警告", "請先載入地圖")
+            return
+
+        # 依 checkbutton 狀態重建合成圖（全解析度）
+        show_zone = getattr(self, '_show_zone_var', tk.IntVar(value=1)).get() == 1
+        show_highlight = getattr(self, '_show_highlight_var', tk.IntVar(value=1)).get() == 1
+
+        result_img = self._base_pil_img.copy().convert("RGBA")
+
+        if show_zone and hasattr(self, '_zone_pil_img') and self._zone_pil_img:
+            zone_img = self._zone_pil_img.convert("RGBA")
+            if zone_img.size != result_img.size:
+                zone_img = zone_img.resize(result_img.size, Image.LANCZOS)
+            result_img = Image.alpha_composite(result_img, zone_img)
+
+        if show_highlight and hasattr(self, '_overlay_pil_img') and self._overlay_pil_img:
+            overlay_img = self._overlay_pil_img.convert("RGBA")
+            if overlay_img.size != result_img.size:
+                overlay_img = overlay_img.resize(result_img.size, Image.LANCZOS)
+            result_img = Image.alpha_composite(result_img, overlay_img)
+
+        # 建立圖例並水平拼接
+        legend_img = self._build_legend_image(result_img.height, show_zone, show_highlight)
+        combined = Image.new("RGBA", (result_img.width + legend_img.width, result_img.height), (255, 255, 255, 255))
+        combined.paste(result_img, (0, 0))
+        combined.paste(legend_img, (result_img.width, 0))
+
+        # 選擇儲存位置
+        floor_label = getattr(self, '_current_floor', '')
+        default_name = f"map_{floor_label}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+        save_path = filedialog.asksaveasfilename(
+            defaultextension=".png",
+            filetypes=[("PNG 圖片", "*.png"), ("JPEG 圖片", "*.jpg"), ("所有檔案", "*.*")],
+            title="選擇圖片儲存位置",
+            initialfile=default_name
+        )
+        if not save_path:
+            return
+
+        export_img = combined.convert("RGB") if save_path.lower().endswith(('.jpg', '.jpeg')) else combined
+        export_img.save(save_path)
+        messagebox.showinfo("成功", f"圖片已儲存至：\n{save_path}")
+        logging.info(f"圖片已匯出至 {save_path}")
+
+    def _build_legend_image(self, height, show_zone=True, show_highlight=True):
+        """建立圖例 PIL Image，與地圖等高後拼接於右側
+
+        Args:
+            height: 與地圖相同的高度（px）
+            show_zone: 是否顯示施工區域項目
+            show_highlight: 是否顯示打滑高亮項目
+
+        Returns:
+            PIL.Image: RGBA 圖例圖像
+        """
+        from PIL import ImageDraw, ImageFont
+
+        legend_w = 230
+        padding = 20
+        item_h = 45
+        swatch_w, swatch_h = 24, 18
+
+        # 固定圖例項目（依當前圖層狀態決定是否顯示）
+        items = [("行駛方向", (0, 0, 255), "arrow")]
+        if show_zone:
+            items.append(("施工區域", (135, 206, 235), "rect_filled"))
+        if show_highlight:
+            items.append(("打滑高亮位置", (255, 0, 0), "rect_outline"))
+        items.append(("異常地址", (255, 0, 0), "exclaim"))
+        items.append(("異常路段", (255, 165, 0), "exclaim"))
+
+        img = Image.new("RGBA", (legend_w, height), (255, 255, 255, 255))
+        draw = ImageDraw.Draw(img)
+
+        # 左側分隔線
+        draw.line([(1, 0), (1, height - 1)], fill=(180, 180, 180, 255), width=2)
+
+        # 嘗試載入中文字型
+        font_title = font_body = None
+        for fp in ("C:/Windows/Fonts/msyh.ttc", "C:/Windows/Fonts/simhei.ttf", "C:/Windows/Fonts/simsun.ttc"):
+            try:
+                font_title = ImageFont.truetype(fp, 18)
+                font_body = ImageFont.truetype(fp, 14)
+                break
+            except Exception:
+                continue
+        if font_title is None:
+            font_title = ImageFont.load_default()
+            font_body = ImageFont.load_default()
+
+        draw.text((padding, padding), "圖例", fill=(0, 0, 0), font=font_title)
+
+        y = padding + 42
+        for label, color, style in items:
+            sx = padding + 2
+            lx = sx + swatch_w + 12
+            cy = y + swatch_h // 2
+
+            if style == "rect_filled":
+                draw.rectangle([sx, y, sx + swatch_w, y + swatch_h], fill=color, outline=color)
+            elif style == "rect_outline":
+                draw.rectangle([sx, y, sx + swatch_w, y + swatch_h], outline=color, width=3)
+            elif style == "arrow":
+                draw.line([(sx, cy), (sx + swatch_w - 6, cy)], fill=color, width=3)
+                draw.polygon([
+                    (sx + swatch_w, cy),
+                    (sx + swatch_w - 8, cy - 5),
+                    (sx + swatch_w - 8, cy + 5),
+                ], fill=color)
+            elif style == "exclaim":
+                draw.text((sx + 7, y - 2), "!", fill=color, font=font_title)
+
+            draw.text((lx, y + 1), label, fill=(0, 0, 0), font=font_body)
+            y += item_h
+
+        return img
+
+    def _update_skid_ranking(self, floor_label=None):
+        """根據 highlight_log_df 更新右側面板指定樓層的打滑次數排名"""
+        if not hasattr(self, 'skid_rank_tree'):
+            return
+
+        # 清除現有資料
+        for item in self.skid_rank_tree.get_children():
+            self.skid_rank_tree.delete(item)
+
+        if not hasattr(self, 'highlight_log_df') or self.highlight_log_df is None:
+            return
+
+        # 更新樓層標籤
+        if hasattr(self, '_skid_floor_label') and floor_label:
+            self._skid_floor_label.config(text=f"{floor_label} 車輛打滑次數")
+
+        _floor_check = {
+            "1F": lambda n: 101 <= n <= 115,
+            "2F": lambda n: (116 <= n <= 137) or n == 140,
+            "3F": lambda n: n in (138, 139),
+        }
+
+        try:
+            df = self.highlight_log_df.copy()
+            df['number'] = df['number'].astype(str).str.strip()
+            df = df[df['number'].str.len() > 0]
+
+            if floor_label and floor_label in _floor_check:
+                check = _floor_check[floor_label]
+                def _match(s):
+                    try:
+                        return check(int(s))
+                    except Exception:
+                        return False
+                df = df[df['number'].apply(_match)]
+
+            counts = df.groupby('number').size().reset_index(name='count')
+            counts = counts.sort_values('count', ascending=False).reset_index(drop=True)
+            for i, row in counts.iterrows():
+                self.skid_rank_tree.insert("", "end", values=(i + 1, row['number'], row['count']))
+        except Exception as e:
+            logging.error(f"更新打滑次數排名失敗: {e}")
 
     def _get_highlights_for_floor(self, floor_label):
         """
@@ -870,13 +1784,166 @@ class MapPlotUI:
             self.data_folder = None
 
     def load_and_plot_vehicle_map(self, folder_path):
-        """載入指定資料夾並直接繪製車輛地圖"""
-        # 推斷樓層並記錄，供 plot_vehicle_map 使用
+        """載入指定資料夾並直接繪製車輛地圖（優先使用快取）"""
+        # 推斷樓層並記錄
         self._current_floor = self._floor_from_folder(folder_path)
-        self.load_fixed_folder(folder_path)
-        # 若資料夾載入成功才繪圖
-        if self.data_folder:
-            self.plot_vehicle_map()
+
+        # 檢查是否有快取
+        if hasattr(self, '_floor_cache') and self._current_floor in self._floor_cache:
+            self._update_status(f"載入樓層 {self._current_floor}（使用快取）")
+            logging.info(f"使用快取載入樓層 {self._current_floor}")
+
+            # 從快取中獲取資料
+            cache = self._floor_cache[self._current_floor]
+            self.data_folder = cache['folder_path']
+            self.map_data = cache['map_data']
+            self.vehicle_map_plotter = cache['plotter']
+
+            # 設置底圖和圖層
+            self._base_pil_img = cache['base_img']
+            self._zone_pil_img = cache.get('zone_img')  # 施工區域圖層
+            self._overlay_pil_img = cache.get('overlay_img')  # 高亮圖層
+            self._combined_pil_img = cache.get('combined_img', cache['base_img'])
+
+            # 如果快取中沒有 zone 圖層，嘗試產生
+            if self._zone_pil_img is None and hasattr(self, 'vehicle_map_plotter'):
+                # 使用快取中的 plotter 來產生 zone 圖層
+                cache_plotter = cache.get('plotter')
+                if cache_plotter:
+                    # 暫時將 vehicle_map_plotter 設為 cache_plotter 以獲取座標
+                    original_plotter = self.vehicle_map_plotter
+                    self.vehicle_map_plotter = cache_plotter
+                    self._zone_pil_img = self._load_zone_for_floor(self.data_folder)
+                    self._zone_section_pil_img = self._load_zone_section_for_floor(self.data_folder)
+                    # 恢復原來的 plotter
+                    self.vehicle_map_plotter = original_plotter
+                else:
+                    self._zone_pil_img = self._load_zone_for_floor(self.data_folder)
+                    self._zone_section_pil_img = self._load_zone_section_for_floor(self.data_folder)
+
+                # 合併 zone 和 zone_section 圖層
+                if self._zone_pil_img and self._zone_section_pil_img:
+                    # 調整尺寸一致
+                    zone_img = self._zone_pil_img
+                    zone_section_img = self._zone_section_pil_img
+                    if zone_img.size != zone_section_img.size:
+                        zone_section_img = zone_section_img.resize(zone_img.size, Image.LANCZOS)
+                    # 合併兩個圖層
+                    self._zone_pil_img = Image.alpha_composite(zone_img, zone_section_img)
+                elif self._zone_section_pil_img:
+                    self._zone_pil_img = self._zone_section_pil_img
+
+                if self._zone_pil_img:
+                    self._floor_cache[self._current_floor]['zone_img'] = self._zone_pil_img
+                    logging.info(f"施工區域圖層已產生並存入快取，尺寸: {self._zone_pil_img.size}")
+                else:
+                    logging.warning(f"無法為樓層 {self._current_floor} 產生施工區域圖層")
+
+            # 載入 highlight_log.csv
+            self._load_highlight_log(self.data_folder)
+
+            # 填充日期列表（根據樓層過濾）
+            self._populate_date_list()
+
+            # 清除日期選擇（不觸發重繪）
+            for var in self.date_checkboxes.values():
+                var.set(0)
+
+            # 顯示底圖 + 施工區域（初始沒有高亮）
+            if self._base_pil_img:
+                # 建立圖層切換 checkbutton（只建立一次）
+                self._create_layer_checkbuttons()
+                
+                # 自動顯示施工區域圖層（如果存在）
+                if self._zone_pil_img:
+                    # 合成底圖 + 施工區域
+                    result_img = self._base_pil_img.copy()
+                    zone_img = self._zone_pil_img
+                    if zone_img.size != result_img.size:
+                        zone_img = zone_img.resize(result_img.size, Image.LANCZOS)
+                    result_img = Image.alpha_composite(result_img, zone_img)
+                    self.show_image_on_canvas(result_img)
+                else:
+                    self.show_image_on_canvas(self._base_pil_img)
+
+            self._update_status(f"就緒 - {self._current_floor}")
+            logging.info(f"樓層 {self._current_floor} 載入完成（使用快取）")
+            self._update_skid_ranking(self._current_floor)
+        else:
+            # 沒有快取，使用原有流程
+            self._update_status(f"載入樓層 {self._current_floor}（完整載入）...")
+            logging.info(f"樓層 {self._current_floor} 無快取，執行完整載入")
+            self.load_fixed_folder(folder_path)
+            # 若資料夾載入成功才繪圖
+            if self.data_folder:
+                # 填充日期列表
+                self._populate_date_list()
+                self.plot_vehicle_map()
+            self._update_skid_ranking(self._current_floor)
+
+    def _create_layer_checkbuttons(self):
+        """建立圖層切換 checkbutton（顯示施工區域和高亮方框）"""
+        if not hasattr(self, "_show_zone_check"):
+            # 施工區域 checkbutton
+            self._show_zone_var = tk.IntVar(value=1)
+            self._show_zone_check = tk.Checkbutton(
+                self.canvas_frame,
+                text="顯示施工區域",
+                variable=self._show_zone_var,
+                command=self._toggle_layers
+            )
+            self._show_zone_check.grid(row=2, column=0, sticky="w", pady=5, padx=5)
+
+        if not hasattr(self, "_show_highlight_check"):
+            # 高亮方框 checkbutton
+            self._show_highlight_var = tk.IntVar(value=1)
+            self._show_highlight_check = tk.Checkbutton(
+                self.canvas_frame,
+                text="顯示高亮方框",
+                variable=self._show_highlight_var,
+                command=self._toggle_layers
+            )
+            self._show_highlight_check.grid(row=3, column=0, sticky="w", pady=5, padx=5)
+
+    def _toggle_layers(self):
+        """切換圖層顯示（施工區域和高亮方框）"""
+        try:
+            # 獲取各圖層的顯示狀態
+            show_zone = getattr(self, '_show_zone_var', tk.IntVar(value=1)).get() == 1
+            show_highlight = getattr(self, '_show_highlight_var', tk.IntVar(value=1)).get() == 1
+
+            if not hasattr(self, '_base_pil_img') or self._base_pil_img is None:
+                return
+
+            # 從底圖開始
+            result_img = self._base_pil_img.copy()
+
+            # 第二層：施工區域（如果存在且顯示）
+            if show_zone and hasattr(self, '_zone_pil_img') and self._zone_pil_img:
+                # 調整尺寸
+                zone_img = self._zone_pil_img
+                if zone_img.size != result_img.size:
+                    zone_img = zone_img.resize(result_img.size, Image.LANCZOS)
+                result_img = Image.alpha_composite(result_img, zone_img)
+
+            # 第三層：高亮方框（如果存在且顯示）
+            if show_highlight and hasattr(self, '_overlay_pil_img') and self._overlay_pil_img:
+                # 調整尺寸
+                overlay_img = self._overlay_pil_img
+                if overlay_img.size != result_img.size:
+                    overlay_img = overlay_img.resize(result_img.size, Image.LANCZOS)
+                result_img = Image.alpha_composite(result_img, overlay_img)
+
+            # 顯示合成後的圖像
+            self.show_image_on_canvas(result_img)
+
+            # 更新狀態
+            zone_status = "顯示" if show_zone else "隱藏"
+            highlight_status = "顯示" if show_highlight else "隱藏"
+            self._update_status(f"圖層: 施工區域[{zone_status}] 高亮方框[{highlight_status}]")
+
+        except Exception as e:
+            logging.error(f"切換圖層失敗: {e}")
 
     def plot_vehicle_map(self):
         """繪製車輛地圖（支援樓層對應的 highlights.csv）"""
@@ -900,16 +1967,12 @@ class MapPlotUI:
             self.vehicle_map_plotter.set_show_tag_id(self.show_tag_id.get() == '1')
             self.vehicle_map_plotter.set_show_address_id(self.show_address_id.get() == '1')
 
-            # 由 highlights.csv 決定本次要高亮的 address / section
-            addr_ids, sec_ids = self._get_highlights_for_floor(getattr(self, "_current_floor", None))
+            # 根據使用者選擇的日期決定要高亮的 address / section
+            selected_indices = self.date_listbox.curselection() if hasattr(self, 'date_listbox') else []
+            selected_dates = [self.date_listbox.get(i) for i in selected_indices] if selected_indices else []
 
-            # 若沒有 highlights，仍可用 UI code 指定預設（可保留或移除）
-            if not addr_ids:
-                # 預設範例（如需移除請刪掉這三行）
-                # addr_ids = ['106508700', '103505600']
-                addr_ids = []
-            if not sec_ids:
-                sec_ids = []
+            # 使用選擇的日期過濾高亮數據
+            addr_ids, sec_ids = self._get_highlights_by_dates(selected_dates)
 
             # 轉換 id 型態（若原本是字串數字轉為 int）
             def cast_ids(lst):
@@ -932,30 +1995,40 @@ class MapPlotUI:
             self.vehicle_map_plotter.load()
             self.vehicle_map_plotter.execute()
 
-            # 取得圖像並顯示（保持原有邏輯）
-            base_pil = self.vehicle_map_plotter.get_base_image()
-            fig = self.vehicle_map_plotter.get_figure()
-            overlay_pil = None
-            if fig is not None:
-                buf = io.BytesIO()
-                fig.savefig(buf, format='png', bbox_inches='tight', pad_inches=0)
-                buf.seek(0)
-                overlay_pil = Image.open(buf).convert("RGBA").copy()
-                buf.close()
+            # 取得第一圖層（原始底圖）
+            self._base_pil_img = self.vehicle_map_plotter.get_base_image()
+            # 取得第二圖層（純方框圖層，透明背景）
+            self._overlay_pil_img = self.vehicle_map_plotter.get_overlay_image()
 
-            self._base_pil_img = base_pil if base_pil is not None else overlay_pil
-            self._overlay_pil_img = overlay_pil if overlay_pil is not None else self._base_pil_img
+            # 建立合成圖（底圖 + 方框）
+            if self._base_pil_img and self._overlay_pil_img:
+                # 確保兩個圖層尺寸一致
+                if self._base_pil_img.size != self._overlay_pil_img.size:
+                    # 調整 overlay 尺寸以匹配 base
+                    self._overlay_pil_img = self._overlay_pil_img.resize(self._base_pil_img.size, Image.LANCZOS)
 
-            if not hasattr(self, "_show_base_btn"):
-                self._show_base_btn = tk.Button(self.canvas_frame, text="原始圖", width=8,
-                                               command=lambda: self.show_image_on_canvas(self._base_pil_img))
-                self._show_highlight_btn = tk.Button(self.canvas_frame, text="加框圖", width=8,
-                                                     command=lambda: self.show_image_on_canvas(self._overlay_pil_img))
-                self._show_base_btn.grid(row=2, column=0, sticky="w", pady=5, padx=5)
-                self._show_highlight_btn.grid(row=2, column=1, sticky="w", pady=5, padx=5)
+                # 合成圖層：底圖 + 方框
+                self._combined_pil_img = Image.new("RGBA", self._base_pil_img.size)
+                self._combined_pil_img.paste(self._base_pil_img, (0, 0))
+                self._combined_pil_img.paste(self._overlay_pil_img, (0, 0), self._overlay_pil_img)
+            else:
+                self._combined_pil_img = self._base_pil_img
 
-            if self._overlay_pil_img:
-                self.show_image_on_canvas(self._overlay_pil_img)
+            # 建立圖層切換 checkbutton（只建立一次）
+            if not hasattr(self, "_show_highlight_var"):
+                self._show_highlight_var = tk.IntVar(value=1)  # 預設勾選，顯示方框
+                self._show_highlight_check = tk.Checkbutton(
+                    self.canvas_frame,
+                    text="顯示高亮方框",
+                    variable=self._show_highlight_var,
+                    command=self._toggle_vehicle_highlight
+                )
+                # 放在 canvas_frame 的第 2 行
+                self._show_highlight_check.grid(row=2, column=0, sticky="w", pady=5, padx=5)
+
+            # 根據 checkbutton 狀態顯示圖像
+            if self._show_highlight_var.get() == 1 and self._combined_pil_img:
+                self.show_image_on_canvas(self._combined_pil_img)
             elif self._base_pil_img:
                 self.show_image_on_canvas(self._base_pil_img)
 
@@ -1060,3 +2133,257 @@ class MapPlotUI:
             self.output_canvas.yview_moveto(frac_y)
         except Exception:
             pass
+
+    def _clamp(self, v, lo, hi):
+        """將 v 限制在 [lo, hi] 範圍內（helper）。"""
+        try:
+            return max(lo, min(hi, v))
+        except Exception:
+            # 若傳入非數值或發生錯誤，回傳邊界值以避免崩潰
+            return lo if v is None else lo
+
+    def _on_date_frame_configure(self, event):
+        """當日期框架內容變化時更新滾動區域"""
+        self.date_canvas.configure(scrollregion=self.date_canvas.bbox("all"))
+
+    def _on_date_canvas_configure(self, event):
+        """當 canvas 大小變化時調整內部框架寬度"""
+        canvas_width = event.width
+        self.date_canvas.itemconfig(self.date_canvas_window, width=canvas_width)
+
+    def _on_date_list_mousewheel(self, event):
+        """處理日期列表的滑鼠滾輪事件"""
+        if hasattr(event, 'delta') and event.delta:
+            # Windows/Mac
+            self.date_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        elif hasattr(event, 'num'):
+            # Linux
+            if event.num == 4:
+                self.date_canvas.yview_scroll(-1, "units")
+            elif event.num == 5:
+                self.date_canvas.yview_scroll(1, "units")
+
+    def _populate_date_list(self):
+        """填充日期列表（根據當前選擇的樓層過濾）"""
+        try:
+            # 清除現有的所有 checkbox
+            for widget in self.date_checkbox_frame.winfo_children():
+                widget.destroy()
+            self.date_checkboxes.clear()
+
+            if not hasattr(self, 'highlight_log_df') or self.highlight_log_df is None:
+                no_data_label = ttk.Label(self.date_checkbox_frame, text="(無資料)")
+                no_data_label.pack(pady=5, padx=5, anchor="w")
+                return
+
+            # 根據當前樓層過濾資料
+            df = self.highlight_log_df.copy()
+
+            # 如果有當前樓層，則過濾對應的 number 範圍
+            if hasattr(self, '_current_floor') and self._current_floor:
+                def to_int_safe(s):
+                    try:
+                        return int(str(s).strip())
+                    except Exception:
+                        return None
+
+                df["_num"] = df["number"].apply(to_int_safe)
+
+                # 根據樓層定義 number 範圍
+                want_nums = set()
+                if self._current_floor == "1F":
+                    want_nums.update(range(101, 116))
+                elif self._current_floor == "2F":
+                    want_nums.update(range(116, 138))
+                    want_nums.add(140)
+                elif self._current_floor == "3F":
+                    want_nums.update([138, 139])
+
+                # 過濾符合樓層的記錄
+                if want_nums:
+                    df = df[df["_num"].isin(want_nums)]
+                    logging.info(f"樓層 {self._current_floor} 過濾後剩餘 {len(df)} 筆記錄")
+
+            # 獲取唯一日期並排序
+            dates = df['start_date'].unique()
+            dates = sorted([d for d in dates if d and d.strip()])
+
+            if not dates:
+                floor_info = f" ({self._current_floor})" if hasattr(self, '_current_floor') and self._current_floor else ""
+                no_data_label = ttk.Label(self.date_checkbox_frame, text=f"(無日期資料{floor_info})")
+                no_data_label.pack(pady=5, padx=5, anchor="w")
+                return
+
+            # 創建 checkbox 列表
+            for date in dates:
+                var = tk.IntVar(value=0)  # 預設不選中
+                cb = ttk.Checkbutton(
+                    self.date_checkbox_frame,
+                    text=date,
+                    variable=var,
+                    command=self._on_date_checkbox_changed
+                )
+                cb.pack(anchor="w", padx=1, pady=0)
+                self.date_checkboxes[date] = var
+
+            floor_info = f"樓層 {self._current_floor} " if hasattr(self, '_current_floor') and self._current_floor else ""
+            logging.info(f"已載入 {floor_info}{len(dates)} 個日期")
+
+        except Exception as e:
+            logging.error(f"填充日期列表失敗: {e}")
+
+    def _on_date_checkbox_changed(self):
+        """當用戶變更 checkbox 時的處理"""
+        try:
+            # 獲取選中的日期
+            selected_dates = [date for date, var in self.date_checkboxes.items() if var.get() == 1]
+
+            if not selected_dates:
+                logging.info("未選擇任何日期")
+            else:
+                logging.info(f"已選擇日期: {selected_dates}")
+
+            # 自動重新繪製地圖
+            self._reload_highlights()
+
+        except Exception as e:
+            logging.error(f"日期選擇處理失敗: {e}")
+
+    def _select_all_dates(self):
+        """全選所有日期"""
+        for var in self.date_checkboxes.values():
+            var.set(1)
+        self._reload_highlights()
+
+    def _clear_date_selection(self):
+        """清除日期選擇"""
+        for var in self.date_checkboxes.values():
+            var.set(0)
+        # 清除高亮並重繪
+        self._reload_highlights()
+
+    def _reload_highlights(self):
+        """根據選擇的日期重新載入高亮並重繪地圖（僅更新方框圖層）"""
+        try:
+            # 獲取當前選擇的日期（從 checkbox）
+            selected_dates = [date for date, var in self.date_checkboxes.items() if var.get() == 1] if hasattr(self, 'date_checkboxes') else []
+
+            # 更新狀態
+            if selected_dates:
+                self._update_status(f"更新高亮 ({len(selected_dates)} 個日期)...")
+            else:
+                self._update_status("清除高亮...")
+
+            # 根據日期過濾高亮數據
+            addr_ids, sec_ids = self._get_highlights_by_dates(selected_dates)
+
+            # 轉換 id 型態（若原本是字串數字轉為 int）
+            def cast_ids(lst):
+                out = []
+                for v in lst:
+                    if isinstance(v, str):
+                        s = v.strip()
+                        if s.isdigit():
+                            out.append(int(s))
+                        else:
+                            out.append(s)
+                    else:
+                        out.append(v)
+                return out
+
+            # 設定新的高亮 ID
+            if hasattr(self, 'vehicle_map_plotter'):
+                self.vehicle_map_plotter.set_highlight_address_ids(cast_ids(addr_ids))
+                self.vehicle_map_plotter.set_highlight_section_ids(cast_ids(sec_ids))
+
+                # 只重新生成 overlay 圖層，不重繪底圖
+                if self.vehicle_map_plotter.regenerate_overlay():
+                    # 成功重新生成 overlay，更新顯示
+                    self._overlay_pil_img = self.vehicle_map_plotter.get_overlay_image()
+
+                    # 重新合成圖層：底圖 + 施工區域 + 高亮
+                    result_img = self._base_pil_img.copy() if self._base_pil_img else None
+                    
+                    # 如果有施工區域圖層，先合成施工區域
+                    if result_img and hasattr(self, '_zone_pil_img') and self._zone_pil_img:
+                        zone_img = self._zone_pil_img
+                        if zone_img.size != result_img.size:
+                            zone_img = zone_img.resize(result_img.size, Image.LANCZOS)
+                        result_img = Image.alpha_composite(result_img, zone_img)
+                    
+                    # 再合成高亮圖層
+                    if result_img and self._overlay_pil_img:
+                        overlay_img = self._overlay_pil_img
+                        if overlay_img.size != result_img.size:
+                            overlay_img = overlay_img.resize(result_img.size, Image.LANCZOS)
+                        result_img = Image.alpha_composite(result_img, overlay_img)
+                    
+                    self._combined_pil_img = result_img
+
+                    # 根據 checkbutton 狀態顯示圖像
+                    if hasattr(self, '_show_highlight_var') and self._show_highlight_var.get() == 1 and self._combined_pil_img:
+                        self.show_image_on_canvas(self._combined_pil_img)
+                    elif self._base_pil_img:
+                        self.show_image_on_canvas(self._base_pil_img)
+
+                    # 更新快取
+                    if hasattr(self, '_floor_cache') and hasattr(self, '_current_floor') and self._current_floor in self._floor_cache:
+                        self._floor_cache[self._current_floor]['overlay_img'] = self._overlay_pil_img
+                        self._floor_cache[self._current_floor]['combined_img'] = self._combined_pil_img
+
+                    # 更新狀態
+                    floor_info = f" - {self._current_floor}" if hasattr(self, '_current_floor') else ""
+                    self._update_status(f"就緒{floor_info} ({len(addr_ids)} addresses, {len(sec_ids)} sections)")
+                    logging.info(f"已更新高亮（{len(addr_ids)} addresses, {len(sec_ids)} sections）")
+                else:
+                    # 重新生成失敗，回退到完整重繪
+                    logging.warning("重新生成 overlay 失敗，執行完整重繪")
+                    if hasattr(self, 'data_folder') and self.data_folder:
+                        self.plot_vehicle_map()
+
+        except Exception as e:
+            logging.error(f"重新載入高亮失敗: {e}")
+
+    def _get_highlights_by_dates(self, selected_dates):
+        """根據選擇的日期獲取高亮的 address 和 section IDs
+
+        Args:
+            selected_dates: 選擇的日期列表
+
+        Returns:
+            tuple: (address_ids, section_ids)
+        """
+        addr_ids = []
+        sec_ids = []
+
+        if not selected_dates or not hasattr(self, 'highlight_log_df') or self.highlight_log_df is None:
+            return addr_ids, sec_ids
+
+        try:
+            # 過濾出選擇日期的記錄
+            filtered_df = self.highlight_log_df[self.highlight_log_df['start_date'].isin(selected_dates)]
+
+            for _, row in filtered_df.iterrows():
+                addr = row.get("addressid", "")
+                sec = row.get("sectionid", "")
+
+                # 優先使用 addressid，若為空則使用 sectionid
+                if isinstance(addr, str) and addr.strip() != "":
+                    try:
+                        val = int(addr.strip()) if addr.strip().isdigit() else addr.strip()
+                        addr_ids.append(val)
+                    except Exception:
+                        addr_ids.append(addr.strip())
+                elif isinstance(sec, str) and sec.strip() != "":
+                    try:
+                        val = int(sec.strip()) if sec.strip().isdigit() else sec.strip()
+                        sec_ids.append(val)
+                    except Exception:
+                        sec_ids.append(sec.strip())
+
+            logging.info(f"根據 {len(selected_dates)} 個日期過濾出 {len(addr_ids)} addresses, {len(sec_ids)} sections")
+
+        except Exception as e:
+            logging.error(f"過濾日期資料失敗: {e}")
+
+        return addr_ids, sec_ids
