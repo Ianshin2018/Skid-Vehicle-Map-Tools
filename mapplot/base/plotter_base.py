@@ -414,6 +414,11 @@ class PlotterBase:
             # 關閉 overlay figure 釋放記憶體
             plt.close(overlay_fig)
 
+            # 儲存座標軸範圍與點擊偵測區域（data 座標）
+            self._ax_xlim = xlim
+            self._ax_ylim = ylim
+            self.highlight_hit_areas = self._compute_highlight_hit_areas()
+
             logging.info("成功重新生成 overlay 圖層")
             return True
 
@@ -421,6 +426,69 @@ class PlotterBase:
             logging.error(f"重新生成 overlay 圖層失敗: {e}")
             self.overlay_image = None
             return False
+
+    def _compute_highlight_hit_areas(self):
+        """計算當前高亮方框的點擊偵測區域，回傳 data 座標的 list。"""
+        hit_areas = []
+        try:
+            # ── Address highlights ──
+            if hasattr(self, 'highlight_address_ids') and self.highlight_address_ids and self.df_addr is not None:
+                want_addrs = [str(s).strip() for s in self.highlight_address_ids]
+                df_addr = self.df_addr.copy()
+                df_addr['_addr_str'] = df_addr['AddressId'].astype(str).str.strip()
+                for want in want_addrs:
+                    matched = df_addr[df_addr['_addr_str'] == want]
+                    if matched.empty:
+                        try:
+                            want_int = int(want)
+                            matched = df_addr[df_addr['_addr_str'].apply(
+                                lambda s: s.isdigit() and int(s) == want_int)]
+                        except Exception:
+                            pass
+                    for _, r in matched.iterrows():
+                        x, y = float(r['X']), float(r['Y'])
+                        hit_areas.append({
+                            'type': 'address',
+                            'id': str(r['AddressId']).strip(),
+                            'xmin': x - 2, 'ymin': y - 2,
+                            'xmax': x + 2, 'ymax': y + 2,
+                            'from_addr': None, 'to_addr': None,
+                        })
+
+            # ── Section highlights ──
+            if hasattr(self, 'highlight_section_ids') and self.highlight_section_ids and self.df_section is not None:
+                want_set = {str(s).strip() for s in self.highlight_section_ids}
+                df_sec = self.df_section.copy()
+                df_sec['_sec_str'] = df_sec['SectionId'].astype(str).str.strip()
+                for _, sec_row in df_sec[df_sec['_sec_str'].isin(want_set)].iterrows():
+                    from_addr = sec_row['FromAddressId']
+                    to_addr = sec_row['ToAddressId']
+                    try:
+                        def addr_to_key(a):
+                            s = str(a)
+                            return (int(s[1:4]), int(s[4:7]))
+                        k1, k2 = addr_to_key(from_addr), addr_to_key(to_addr)
+                        x1, y1 = self.x_dict.get(k1), self.y_dict.get(k1)
+                        x2, y2 = self.x_dict.get(k2), self.y_dict.get(k2)
+                        if None in (x1, y1, x2, y2):
+                            continue
+                        pad, min_side = 4.0, 8.0
+                        xmin = min(x1, x2) - pad
+                        ymin = min(y1, y2) - pad
+                        width  = max(abs(x2 - x1) + 2 * pad, min_side)
+                        height = max(abs(y2 - y1) + 2 * pad, min_side)
+                        hit_areas.append({
+                            'type': 'section',
+                            'id': str(sec_row['SectionId']).strip(),
+                            'xmin': xmin, 'ymin': ymin,
+                            'xmax': xmin + width, 'ymax': ymin + height,
+                            'from_addr': str(from_addr), 'to_addr': str(to_addr),
+                        })
+                    except Exception:
+                        continue
+        except Exception as e:
+            logging.warning(f"計算 highlight hit areas 失敗: {e}")
+        return hit_areas
 
     def load(self):
         """載入地圖資料"""

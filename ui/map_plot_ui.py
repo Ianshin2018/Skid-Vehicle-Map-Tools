@@ -229,17 +229,20 @@ class MapPlotUI:
         date_btn_frame = ttk.Frame(self.left_panel)
         date_btn_frame.pack(fill=tk.X, padx=5, pady=5)
 
-        # 全選按鈕
-        select_all_btn = ttk.Button(date_btn_frame, text="全選", width=5, command=self._select_all_dates)
-        select_all_btn.pack(side=tk.LEFT, padx=1)
+        # 全選按鈕（點選樓層前禁用）
+        self._date_select_all_btn = ttk.Button(date_btn_frame, text="全選", width=5,
+                                               state=tk.DISABLED, command=self._select_all_dates)
+        self._date_select_all_btn.pack(side=tk.LEFT, padx=1)
 
-        # 清除選擇按鈕
-        clear_sel_btn = ttk.Button(date_btn_frame, text="清除", width=5, command=self._clear_date_selection)
-        clear_sel_btn.pack(side=tk.LEFT, padx=1)
+        # 清除選擇按鈕（點選樓層前禁用）
+        self._date_clear_btn = ttk.Button(date_btn_frame, text="清除", width=5,
+                                          state=tk.DISABLED, command=self._clear_date_selection)
+        self._date_clear_btn.pack(side=tk.LEFT, padx=1)
 
-        # 重新載入按鈕
-        reload_btn = ttk.Button(date_btn_frame, text="重載", width=5, command=self._reload_highlights)
-        reload_btn.pack(side=tk.LEFT, padx=1)
+        # 重新載入按鈕（點選樓層前禁用）
+        self._date_reload_btn = ttk.Button(date_btn_frame, text="重載", width=5,
+                                           state=tk.DISABLED, command=self._reload_highlights)
+        self._date_reload_btn.pack(side=tk.LEFT, padx=1)
 
         # === 中間面板包含原有的所有功能 ===
         # 建立框架容器（原 status_frame）
@@ -302,6 +305,7 @@ class MapPlotUI:
         self.output_canvas.bind("<Configure>", self._on_canvas_resize)
         self.output_canvas.bind("<ButtonPress-1>", self._start_move)
         self.output_canvas.bind("<B1-Motion>", self._move_canvas)
+        self.output_canvas.bind("<ButtonRelease-3>", self._on_canvas_right_click)
 
         # 新增滑鼠滾輪縮放支援（Windows / Mac / Linux）
         # Windows / Mac: <MouseWheel>， event.delta (正負)
@@ -310,8 +314,8 @@ class MapPlotUI:
         self.output_canvas.bind("<Button-4>", self._on_mousewheel)       # Linux scroll up
         self.output_canvas.bind("<Button-5>", self._on_mousewheel)       # Linux scroll down
 
-        # 新增三個樓層按鈕
-        self.floor_buttons = []
+        # 新增三個樓層按鈕（預載完成前禁用）
+        self.floor_buttons = {}
         floor_info = [
             ("1F", os.path.join(DATA_ROOT, "..", "Map", "Garmin1F")),
             ("2F", os.path.join(DATA_ROOT, "..", "Map", "Garmin2F")),
@@ -322,9 +326,10 @@ class MapPlotUI:
                 self.canvas_frame,
                 text=label,
                 width=4,
+                state=tk.DISABLED,
                 command=lambda f=folder: self.load_and_plot_vehicle_map(f)
             )
-            self.floor_buttons.append(btn)
+            self.floor_buttons[label] = btn
             # 不要在這裡 place
 
     def _start_move(self, event):
@@ -344,7 +349,7 @@ class MapPlotUI:
         self.zoom_in_btn.place(in_=self.output_canvas, x=canvas_w - btn_width*2 - btn_spacing - btn_margin, y=btn_y)
         self.zoom_out_btn.place(in_=self.output_canvas, x=canvas_w - btn_width - btn_margin, y=btn_y) 
         # 固定樓層按鈕在畫布左上角
-        for idx, btn in enumerate(self.floor_buttons):
+        for idx, btn in enumerate(self.floor_buttons.values()):
             btn.place(in_=self.output_canvas, x=10, y=10+idx*35)
     def _create_buttons(self):
         """建立按鈕"""
@@ -522,14 +527,82 @@ class MapPlotUI:
             logging.error(f"錯誤: {str(e)} | 檔案: {filename} | 行數: {line} | 類型: {type(e).__name__}")
             messagebox.showerror("錯誤", f"繪製車輛地圖時發生錯誤: {str(e)}")
     
+    def _on_canvas_right_click(self, event):
+        """右鍵點擊畫布：若點到高亮方框則顯示 ID 與路徑資訊"""
+        if not self._get_selected_dates():
+            return
+        plotter = getattr(self, 'vehicle_map_plotter', None)
+        if not plotter:
+            return
+        hit_areas = getattr(plotter, 'highlight_hit_areas', [])
+        xlim = getattr(plotter, '_ax_xlim', None)
+        ylim = getattr(plotter, '_ax_ylim', None)
+        base_img = getattr(self, '_base_pil_img', None)
+        if not hit_areas or not xlim or not ylim or not base_img:
+            return
+
+        # canvas 座標（含滾動偏移）→ 全解析度圖片像素座標
+        cx = self.output_canvas.canvasx(event.x)
+        cy = self.output_canvas.canvasy(event.y)
+        scale = self._image_scale
+        img_px_x = cx / scale
+        img_px_y = cy / scale
+
+        # 圖片像素 → matplotlib data 座標（線性映射）
+        img_w, img_h = base_img.size
+        data_x = xlim[0] + (img_px_x / img_w) * (xlim[1] - xlim[0])
+        data_y = ylim[1] - (img_px_y / img_h) * (ylim[1] - ylim[0])
+
+        # 尋找第一個包含點擊座標的方框
+        clicked = None
+        for area in hit_areas:
+            if area['xmin'] <= data_x <= area['xmax'] and area['ymin'] <= data_y <= area['ymax']:
+                clicked = area
+                break
+
+        if clicked:
+            self._show_highlight_popup(event, clicked)
+
+    def _show_highlight_popup(self, event, info):
+        """在點擊位置旁顯示高亮方框資訊的浮動小視窗（4秒後自動關閉）"""
+        # 關閉上一個（若存在）
+        prev = getattr(self, '_highlight_popup', None)
+        if prev:
+            try:
+                prev.destroy()
+            except Exception:
+                pass
+
+        if info['type'] == 'address':
+            text = f"Address ID：{info['id']}"
+        else:
+            text = (f"Section ID：{info['id']}\n"
+                    f"起點 (From)：{info['from_addr']}\n"
+                    f"終點 (To)：{info['to_addr']}")
+
+        popup = tk.Toplevel(self.root)
+        popup.wm_overrideredirect(True)
+        popup.attributes("-topmost", True)
+        popup.geometry(f"+{event.x_root + 12}+{event.y_root + 12}")
+
+        frame = tk.Frame(popup, bd=1, relief=tk.SOLID, bg="#FFFDE7")
+        frame.pack()
+        tk.Label(frame, text=text, bg="#FFFDE7", fg="#333333",
+                 padx=10, pady=6, justify=tk.LEFT,
+                 font=("Microsoft YaHei", 9)).pack()
+
+        self._highlight_popup = popup
+        popup.after(4000, lambda: popup.destroy() if popup.winfo_exists() else None)
+
     def _toggle_vehicle_highlight(self):
         """切換車輛地圖的高亮方框顯示"""
-        if self._show_highlight_var.get() == 1:
-            # 勾選：顯示合成圖（底圖 + 方框）
+        has_dates = bool(self._get_selected_dates()) if hasattr(self, 'date_checkboxes') else False
+        if self._show_highlight_var.get() == 1 and has_dates:
+            # 勾選且有選擇日期：顯示合成圖（底圖 + 方框）
             if hasattr(self, '_combined_pil_img') and self._combined_pil_img:
                 self.show_image_on_canvas(self._combined_pil_img)
         else:
-            # 取消勾選：只顯示底圖
+            # 取消勾選或無日期：顯示底圖（含施工區域，不含高亮）
             if hasattr(self, '_base_pil_img') and self._base_pil_img:
                 self.show_image_on_canvas(self._base_pil_img)
 
@@ -729,8 +802,7 @@ class MapPlotUI:
         # self.error_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         # self.error_text.config(height=7)
 
-        # 打滑門檻滑桿（異常資訊下方、畫布上方）
-        self._skid_slider_frame.pack(fill=tk.X, padx=5, pady=(0, 2))
+        # 打滑門檻滑桿（異常資訊下方、畫布上方）—— 初始隱藏，點選樓層後顯示
 
         self.canvas_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         self.output_canvas.grid(row=0, column=0, sticky="nsew")
@@ -1481,12 +1553,15 @@ class MapPlotUI:
                     # 獲取底圖
                     base_img = floor_plotter.get_base_image()
 
+                    # 預載高亮 overlay（全部日期 + 預設門檻）
+                    overlay_img = self._preload_floor_overlay(floor_label, floor_plotter)
+
                     # 儲存到快取
                     self._floor_cache[floor_label] = {
                         'plotter': floor_plotter,
                         'base_img': base_img,
-                        'overlay_img': None,  # 初始沒有高亮
-                        'combined_img': base_img,  # 初始合成圖就是底圖
+                        'overlay_img': overlay_img,
+                        'combined_img': base_img,  # 初始合成圖先用底圖，點樓層時加入 zone
                         'map_data': validation_result,
                         'folder_path': folder_path,
                     }
@@ -1494,7 +1569,9 @@ class MapPlotUI:
                     self._floor_loading_status[floor_label] = 'loaded'
                     loaded_count += 1
                     self._update_progress(loaded_count)
-                    logging.info(f"樓層 {floor_label} 底圖預載完成 (尺寸: {base_img.size if base_img else 'N/A'})")
+                    logging.info(f"樓層 {floor_label} 底圖+高亮預載完成 (尺寸: {base_img.size if base_img else 'N/A'})")
+                    fl = floor_label
+                    self.root.after(0, lambda fl=fl: self._enable_floor_button(fl))
 
                 except Exception as e:
                     logging.error(f"預載樓層 {floor_label} 失敗: {e}")
@@ -1514,6 +1591,71 @@ class MapPlotUI:
         finally:
             # 重置進度條
             self.root.after(2000, lambda: self._update_progress(0))
+
+    def _preload_floor_overlay(self, floor_label, plotter):
+        """在背景預載指定樓層的高亮 overlay（全部日期、預設門檻）。
+        回傳 PIL Image 或 None（失敗時）。
+        """
+        try:
+            if not hasattr(self, 'highlight_log_df') or self.highlight_log_df is None:
+                return None
+
+            # 依樓層篩選車輛編號範圍，取得該樓層所有日期
+            floor_nums = {
+                '1F': set(range(101, 116)),
+                '2F': set(range(116, 138)) | {140},
+                '3F': {138, 139},
+            }.get(floor_label, set())
+
+            df = self.highlight_log_df.copy()
+            if floor_nums:
+                def to_int_safe(s):
+                    try:
+                        return int(str(s).strip())
+                    except Exception:
+                        return None
+                df['_num'] = df['number'].apply(to_int_safe)
+                df = df[df['_num'].isin(floor_nums)]
+
+            all_dates = list(df['start_date'].dropna().unique())
+            if not all_dates:
+                return None
+
+            addr_counts, sec_counts = self._calc_highlight_counts(all_dates)
+            all_counts = list(addr_counts.values()) + list(sec_counts.values())
+            if not all_counts:
+                return None
+
+            # 計算預設門檻（與 _update_skid_slider_range 一致）
+            min_c = max(min(all_counts), 1)
+            max_c = max(all_counts)
+            threshold = max((min_c + max_c) // 2, 1)
+
+            def cast_ids(lst):
+                out = []
+                for v in lst:
+                    s = str(v).strip()
+                    out.append(int(s) if s.isdigit() else s)
+                return out
+
+            addr_ids = cast_ids([aid for aid, cnt in addr_counts.items() if cnt >= threshold])
+            sec_ids  = cast_ids([sid for sid, cnt in sec_counts.items()  if cnt >= threshold])
+
+            plotter.set_highlight_address_ids(addr_ids)
+            plotter.set_highlight_section_ids(sec_ids)
+            if plotter.regenerate_overlay():
+                overlay = plotter.get_overlay_image()
+                logging.info(f"樓層 {floor_label} 高亮 overlay 預載完成（門檻≥{threshold}次）")
+                return overlay
+        except Exception as e:
+            logging.warning(f"預載樓層 {floor_label} 高亮 overlay 失敗: {e}")
+        return None
+
+    def _enable_floor_button(self, floor_label):
+        """啟用指定樓層按鈕（預載完成後從主執行緒呼叫）"""
+        btn = self.floor_buttons.get(floor_label)
+        if btn:
+            btn.config(state=tk.NORMAL)
 
     def _floor_from_folder(self, folder_path):
         """
@@ -1831,6 +1973,15 @@ class MapPlotUI:
         # 推斷樓層並記錄
         self._current_floor = self._floor_from_folder(folder_path)
 
+        # 首次點選樓層時顯示打滑滑桿，並啟用日期篩選按鈕
+        if hasattr(self, '_skid_slider_frame') and not self._skid_slider_frame.winfo_ismapped():
+            self._skid_slider_frame.pack(fill=tk.X, padx=5, pady=(0, 2),
+                                         before=self.canvas_frame)
+        for btn_attr in ('_date_select_all_btn', '_date_clear_btn', '_date_reload_btn'):
+            btn = getattr(self, btn_attr, None)
+            if btn:
+                btn.config(state=tk.NORMAL)
+
         # 檢查是否有快取
         if hasattr(self, '_floor_cache') and self._current_floor in self._floor_cache:
             self._update_status(f"載入樓層 {self._current_floor}（使用快取）")
@@ -1970,8 +2121,9 @@ class MapPlotUI:
                     zone_img = zone_img.resize(result_img.size, Image.LANCZOS)
                 result_img = Image.alpha_composite(result_img, zone_img)
 
-            # 第三層：高亮方框（如果存在且顯示）
-            if show_highlight and hasattr(self, '_overlay_pil_img') and self._overlay_pil_img:
+            # 第三層：高亮方框（需有選擇日期才合成）
+            has_dates = bool(self._get_selected_dates()) if hasattr(self, 'date_checkboxes') else False
+            if show_highlight and has_dates and hasattr(self, '_overlay_pil_img') and self._overlay_pil_img:
                 # 調整尺寸
                 overlay_img = self._overlay_pil_img
                 if overlay_img.size != result_img.size:
@@ -2530,7 +2682,7 @@ class MapPlotUI:
         self._skid_slider.config(from_=0, to=100, state=tk.NORMAL)
         self._skid_slider_var.set(50)
         # 更新標籤顯示中間值門檻
-        self._skid_slider.config(label=f"打滑門檻 ≥{mid_c}次 (中間值:{mid_c} 最高:{max_c})")
+        self._skid_slider.config(label=f"重複打滑門檻 ≥{mid_c}次 (中間值:{mid_c} 最高:{max_c})")
 
     def _slider_pos_to_threshold(self, pos):
         """將滑桿位置 (0-100) 轉換為重複次數門檻。
@@ -2548,16 +2700,26 @@ class MapPlotUI:
         return max(1, int(round(t)))
 
     def _on_skid_slider_changed(self, value):
-        """滑桿移動時，依重複率門檻同時過濾 address 和 section 高亮並更新 overlay。
-        向右 → 門檻升高 → 只顯示重複率高的點/路段；向左 → 門檻降低 → 顯示更多。
-        """
+        """滑桿移動：立即更新標籤（輕量），debounce 150ms 後才執行重繪。"""
         try:
             threshold = self._slider_pos_to_threshold(int(float(value)))
-            # 動態更新滑桿標籤顯示當前門檻
+            # 立即更新標籤，讓使用者感覺有即時回饋
             if hasattr(self, '_skid_slider'):
                 median_c = getattr(self, '_skid_median', 1)
                 max_c = getattr(self, '_skid_max_count', 1)
-                self._skid_slider.config(label=f"打滑門檻 ≥{threshold}次 (中間值:{median_c} 最高:{max_c})")
+                self._skid_slider.config(label=f"重複打滑門檻 ≥{threshold}次 (中間值:{median_c} 最高:{max_c})")
+            # 取消上一次尚未執行的重繪任務
+            if getattr(self, '_skid_after_id', None):
+                self.root.after_cancel(self._skid_after_id)
+            # 150ms 後執行一次重繪（停止拖曳後才更新畫面）
+            self._skid_after_id = self.root.after(150, lambda v=value: self._apply_skid_threshold(v))
+        except Exception as e:
+            logging.error(f"打滑滑桿移動失敗: {e}")
+
+    def _apply_skid_threshold(self, value):
+        """依門檻重新生成 overlay 並更新排名（由 debounce 呼叫）。"""
+        try:
+            threshold = self._slider_pos_to_threshold(int(float(value)))
             addr_counts = getattr(self, '_skid_addr_counts', {})
             sec_counts = getattr(self, '_skid_sec_counts', {})
             if not addr_counts and not sec_counts:
@@ -2594,7 +2756,7 @@ class MapPlotUI:
                     self.show_image_on_canvas(self._combined_pil_img)
                 elif hasattr(self, '_base_pil_img') and self._base_pil_img:
                     self.show_image_on_canvas(self._base_pil_img)
-            # 同步更新右側車輛排名（依相同的日期與門檻過濾）
+            # 同步更新右側車輛排名
             selected_dates = self._get_selected_dates() if hasattr(self, 'date_checkboxes') else []
             self._update_skid_ranking(
                 floor_label=getattr(self, '_current_floor', None),
@@ -2603,4 +2765,4 @@ class MapPlotUI:
                 sec_ids=sec_ids,
             )
         except Exception as e:
-            logging.error(f"打滑滑桿過濾失敗: {e}")
+            logging.error(f"打滑滑桿套用門檻失敗: {e}")

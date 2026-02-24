@@ -1,6 +1,9 @@
 """
 地圖繪製工具主程式入口點
 """
+import matplotlib
+matplotlib.use('Agg')  # 在任何 pyplot import 前設定非互動式後端，避免背景執行緒觸發 GUI 警告
+
 import logging
 import os
 import json
