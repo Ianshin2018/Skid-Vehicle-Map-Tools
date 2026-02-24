@@ -1,44 +1,95 @@
 ﻿start_date,start_time,number,error_message,addressid,sectionid,path
 2026/1/13,11:52:20,109,TravelMissTargetStationTag,,10063,"""100202800"" to ""100102800"""
 2026/1/15,15:37:59,109,TravelAngleBiasOverSafetyRange,,10063,"""100202800"" to ""100102800"""
-2026/1/16,09:34:40,109,TravelAngleBiasOverSafetyRange,,10185,"""101604300"" to ""101504300"""
-2026/1/14,13:01:23,109,MissingTravelBarcodesOverSafetyRange,,HS10202,"""102107400"" to ""102107300"""
-2026/1/16,09:31:20,109,TravelAngleBiasOverSafetyRange,,10231,"""102304200"" to ""102504200"""
-2026/1/19,17:19:54,109,TravelAngleBiasOverSafetyRange,102504200,,
-2026/1/16,11:14:30,113,TravelMissTargetStationTag,100102800,,
-2026/1/16,11:14:50,113,TravelMissTargetStationTag,100102800,,
+2026/1/30,18:27:24,106,TravelMissTargetStationTag,,HS10128,"""100207000"" to ""100206900"""
+2026/1/30,18:34:21,106,TravelMoveCommandFail,,HS10128,"""100207000"" to ""100206900"""
+2026/1/30,10:32:24,122,MissingTravelBarcodesOverSafetyRange,,11398,"""100304200"" to ""100104200"""
+2026/1/19,17:38:22,121,TravelMissTargetStationTag,,10091,"""100404900"" to ""100304900"""
+2026/1/28,19:01:47,124,TravelVerticalBiasOverSafetyRange,,10202,"""100408300"" to ""100408000"""
+2026/1/21,10:23:47,124,TravelMissTargetStationTag,,10078,"""100605400"" to ""100605600"""
+2026/1/20,18:54:48,121,TravelMissTargetStationTag,,10144,"""100607500"" to ""100407500"""
+2026/1/15,09:47:17,124,TravelMissTargetStationTag,,10206,"""100607800"" to ""100608000"""
+2026/1/15,09:47:17,131,TravelMoveCommandFail,,10206,"""100607800"" to ""100608000"""
+2026/1/19,14:13:54,121,TravelVerticalBiasOverSafetyRange,,10126,"""100608900"" to ""100408900"""
+2026/1/19,16:37:43,121,TravelAngleBiasOverSafetyRange,,11193,"""100905800"" to ""100905600"""
 2026/1/19,14:45:56,119,MissingTravelBarcodesOverSafetyRange,,11128,"""101207300"" to ""100907300"""
+2026/2/2,13:39:27,125,MissingTravelBarcodesOverSafetyRange,,11128,"""101207300"" to ""100907300"""
+2026/2/2,19:24:06,133,TravelAngleBiasOverSafetyRange,,10333,"""101505800"" to ""101305800"""
+2026/1/22,10:35:03,137,TravelAngleBiasOverSafetyRange,,10333,"""101505800"" to ""101305800"""
+2026/1/16,09:34:40,109,TravelAngleBiasOverSafetyRange,,10185,"""101604300"" to ""101504300"""
+2026/1/15,18:51:44,121,MissingTravelBarcodesOverSafetyRange,,11253,"""101607300"" to ""101407300"""
+2026/1/26,15:58:38,132,MissingTravelBarcodesOverSafetyRange,,11253,"""101607300"" to ""101407300"""
+2026/1/27,10:29:42,134,TravelAngleBiasOverSafetyRange,,11205,"""101705800"" to ""101605800"""
+2026/2/2,19:36:10,122,TravelVerticalBiasOverSafetyRange,,11207,"""101705800"" to ""101705600"""
+2026/1/14,14:41:32,120,MissingTravelBarcodesOverSafetyRange,,11231,"""101706100"" to ""101706700"""
+2026/1/30,09:57:05,140,TravelAngleBiasOverSafetyRange,,11237,"""101706700"" to ""101707300"""
+2026/1/30,17:11:41,103,MissingTravelBarcodesOverSafetyRange,,HS00184,"""101804500"" to ""101804700"""
+2026/1/26,16:47:41,120,TravelAngleBiasOverSafetyRange,,10938,"""102105600"" to ""102405600"""
+2026/1/30,11:24:17,122,MissingTravelBarcodesOverSafetyRange,,10938,"""102105600"" to ""102405600"""
+2026/1/27,10:19:39,124,TravelAngleBiasOverSafetyRange,,10938,"""102105600"" to ""102405600"""
+2026/1/14,13:01:23,109,MissingTravelBarcodesOverSafetyRange,,HS10202,"""102107400"" to ""102107300"""
+2026/1/26,16:46:07,108,MissingTravelBarcodesOverSafetyRange,,10231,"""102304200"" to ""102504200"""
+2026/2/3,16:49:49,109,TravelAngleBiasOverSafetyRange,,10231,"""102304200"" to ""102504200"""
+2026/1/16,09:31:20,109,TravelAngleBiasOverSafetyRange,,10231,"""102304200"" to ""102504200"""
+2026/1/27,09:56:44,132,MissingTravelBarcodesOverSafetyRange,,11305,"""102804500"" to ""102803800"""
+2026/1/27,10:00:05,132,TravelMissTargetStationTag,,10267,"""103005400"" to ""103005600"""
+2026/1/20,18:15:59,125,TravelAngleBiasOverSafetyRange,,10639,"""103205800"" to ""103005800"""
+2026/1/21,17:02:16,125,TravelAngleBiasOverSafetyRange,,10639,"""103205800"" to ""103005800"""
+2026/2/3,10:40:01,124,MissingTravelBarcodesOverSafetyRange,,10988,"""103505600"" to ""103605600"""
+2026/1/23,15:19:02,133,TravelAngleBiasOverSafetyRange,,10988,"""103505600"" to ""103605600"""
 2026/1/20,15:26:45,119,MissingTravelBarcodesOverSafetyRange,,11025,"""104005600"" to ""104405600"""
+2026/2/2,14:46:36,122,MissingTravelBarcodesOverSafetyRange,,11025,"""104005600"" to ""104405600"""
+2026/1/29,16:25:39,125,TravelAngleBiasOverSafetyRange,,10359,"""104005800"" to ""103605800"""
+2026/1/30,10:41:47,122,MissingTravelBarcodesOverSafetyRange,,11029,"""104405600"" to ""105105600"""
+2026/2/3,12:49:13,122,MissingTravelBarcodesOverSafetyRange,,11029,"""104405600"" to ""105105600"""
+2026/1/16,09:47:08,121,MissingTravelBarcodesOverSafetyRange,,10631,"""105005800"" to ""104405800"""
+2026/1/22,11:09:35,124,TravelAngleBiasOverSafetyRange,,11031,"""105105600"" to ""105405600"""
+2026/1/15,09:40:26,124,MissingTravelBarcodesOverSafetyRange,,11055,"""105405600"" to ""105105600"""
+2026/1/15,09:35:49,124,MissingTravelBarcodesOverSafetyRange,,10653,"""105405600"" to ""105505600"""
 2026/1/15,09:08:36,119,MissingTravelBarcodesOverSafetyRange,,10686,"""105505800"" to ""105405800"""
+2026/2/2,17:24:49,122,TravelVerticalBiasOverSafetyRange,,10472,"""106505600"" to ""107005600"""
 2026/1/15,14:17:28,119,TravelMissTargetStationTag,,10555,"""106508400"" to ""106508700"""
 2026/1/15,12:08:16,119,TravelMissTargetStationTag,,HS10003,"""107003100"" to ""107203100"""
+2026/1/29,15:25:33,130,TravelMissTargetStationTag,,HS10003,"""107003100"" to ""107203100"""
 2026/1/20,13:47:40,119,TravelMoveCommandFail,,10759,"""107005600"" to ""107005500"""
 2026/1/19,11:03:07,119,MissingTravelBarcodesOverSafetyRange,,10581,"""107006600"" to ""107006000"""
+2026/1/15,14:50:08,121,MissingTravelBarcodesOverSafetyRange,,10821,"""107006600"" to ""107006000"""
+2026/1/26,13:15:37,125,MissingTravelBarcodesOverSafetyRange,,10537,"""107009000"" to ""107008800"""
+2026/1/29,16:15:20,130,MissingTravelBarcodesOverSafetyRange,,10872,"""107010000"" to ""107009900"""
+2026/1/29,17:24:31,130,MissingTravelBarcodesOverSafetyRange,,10495,"""107010200"" to ""107010100"""
+2026/2/3,10:57:45,124,MissingTravelBarcodesOverSafetyRange,,10587,"""107205800"" to ""107206000"""
+2026/1/22,17:06:26,124,TravelAngleBiasOverSafetyRange,,10828,"""107206000"" to ""107206600"""
 2026/1/19,10:08:09,119,MissingTravelBarcodesOverSafetyRange,,10826,"""107206600"" to ""107207000"""
 2026/1/20,16:03:49,119,MissingTravelBarcodesOverSafetyRange,,10839,"""107207400"" to ""107207000"""
+2026/2/3,10:58:40,124,MissingTravelBarcodesOverSafetyRange,,10784,"""107207900"" to ""107208200"""
+2026/1/20,13:15:15,124,TravelAngleBiasOverSafetyRange,,10807,"""107208500"" to ""107408500"""
 2026/1/15,16:48:23,119,TravelMissTargetStationTag,,10738,"""107410100"" to ""107210100"""
+2026/2/3,09:07:43,124,MissingTravelBarcodesOverSafetyRange,,10592,"""107505500"" to ""107405500"""
+2026/1/26,13:08:23,108,TravelMissTargetStationTag,101303900,,
+2026/1/19,17:19:54,109,TravelAngleBiasOverSafetyRange,102504200,,
+2026/1/30,17:20:00,111,TravelMissTargetStationTag,100207000,,
+2026/1/21,18:38:07,111,MissingTravelBarcodesOverSafetyRange,100201300,,
+2026/1/16,11:14:30,113,TravelMissTargetStationTag,100102800,,
+2026/1/16,11:14:50,113,TravelMissTargetStationTag,100102800,,
 2026/1/14,14:22:17,119,TravelMoveCommandFail,100404900,,
 2026/1/20,15:04:18,119,TravelMoveCommandFail,100408000,,
 2026/1/20,19:03:58,119,TravelRotateCommandFail,101207600,,
 2026/1/14,14:56:07,119,TravelRotateCommandFail,105405800,,
 2026/1/16,11:14:52,119,TravelMoveCommandFail,106505000,,
 2026/1/20,13:59:45,119,TravelRotateCommandFail,107008400,,
-2026/1/14,14:41:32,120,MissingTravelBarcodesOverSafetyRange,,11231,"""101706100"" to ""101706700"""
 2026/1/20,10:47:05,120,TravelMoveCommandFail,107510600,,
-2026/1/19,17:38:22,121,TravelMissTargetStationTag,,10091,"""100404900"" to ""100304900"""
-2026/1/20,18:54:48,121,TravelMissTargetStationTag,,10144,"""100607500"" to ""100407500"""
-2026/1/19,14:13:54,121,TravelVerticalBiasOverSafetyRange,,10126,"""100608900"" to ""100408900"""
-2026/1/19,16:37:43,121,TravelAngleBiasOverSafetyRange,,11193,"""100905800"" to ""100905600"""
-2026/1/15,18:51:44,121,MissingTravelBarcodesOverSafetyRange,,11253,"""101607300"" to ""101407300"""
-2026/1/16,09:47:08,121,MissingTravelBarcodesOverSafetyRange,,10631,"""105005800"" to ""104405800"""
-2026/1/15,14:50:08,121,MissingTravelBarcodesOverSafetyRange,,10821,"""107006600"" to ""107006000"""
-2026/1/15,09:47:17,124,TravelMissTargetStationTag,,10206,"""100607800"" to ""100608000"""
-2026/1/15,09:40:26,124,MissingTravelBarcodesOverSafetyRange,,11055,"""105405600"" to ""105105600"""
-2026/1/15,09:35:49,124,MissingTravelBarcodesOverSafetyRange,,10653,"""105405600"" to ""105505600"""
-2026/1/20,13:15:15,124,TravelAngleBiasOverSafetyRange,,10807,"""107208500"" to ""107408500"""
+2026/1/28,10:38:41,122,TravelMissTargetStationTag,101407600,,
+2026/1/30,15:54:54,124,TravelMoveCommandFail,107510900,,
 2026/1/20,11:49:14,124,MissingTravelBarcodesOverSafetyRange,107006600,,
 2026/1/19,10:49:54,124,TravelMoveCommandFail,107510600,,
-2026/1/20,18:15:59,125,TravelAngleBiasOverSafetyRange,,10639,"""103205800"" to ""103005800"""
+2026/1/23,15:12:29,125,TravelMoveCommandFail,106505600,,
+2026/2/2,14:59:08,127,TravelMoveCommandFail,100307800,,
 2026/1/20,13:31:29,128,TravelMoveCommandFail,107505500,,
-2026/1/15,09:47:17,131,TravelMoveCommandFail,,10206,"""100607800"" to ""100608000"""
+2026/1/22,09:30:28,128,TravelMoveCommandFail,103505800,,
+2026/1/29,17:19:13,130,TravelMoveCommandFail,107510600,,
+2026/1/29,18:08:04,133,TravelMoveCommandFail,107510600,,
+2026/1/27,14:18:53,133,TravelMissTargetStationTag,100605600,,
 2026/1/15,15:08:56,136,TravelMoveCommandFail,107505700,,
+2026/1/21,09:44:42,137,TravelMissTargetStationTag,101407600,,
+2026/1/22,13:35:56,137,TravelMissTargetStationTag,107208800,,
+2026/1/22,13:36:48,137,TravelMissTargetStationTag,107208800,,

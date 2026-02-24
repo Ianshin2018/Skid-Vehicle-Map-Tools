@@ -265,6 +265,23 @@ class MapPlotUI:
         self.warning_text.config(state=tk.DISABLED)
         self.error_text.config(state=tk.DISABLED)
 
+        # 打滑門檻滑桿（放置於異常資訊與畫布之間）
+        self._skid_slider_var = tk.IntVar(value=1)
+        self._skid_slider_frame = ttk.Frame(self.status_frame)
+        self._skid_slider = tk.Scale(
+            self._skid_slider_frame,
+            from_=1, to=1,
+            orient=tk.HORIZONTAL,
+            variable=self._skid_slider_var,
+            label="重複打滑門檻 (address/section 重複率≥)",
+            showvalue=True,
+            command=self._on_skid_slider_changed,
+            bg="#FFFDE7",
+            relief=tk.GROOVE,
+            font=("", 8),
+        )
+        self._skid_slider.pack(fill=tk.X, expand=True)
+
         # 建立畫布專用框架
         self.canvas_frame = ttk.Frame(self.status_frame)
 
@@ -706,10 +723,14 @@ class MapPlotUI:
 
         # === 中間面板內的原有功能佈局 ===
         self.status_frame.pack(fill=tk.BOTH, expand=True)
-        self.error_frame.pack(fill=tk.X, padx=5, pady=5)
-        self.error_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.error_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self.error_text.config(height=7)  # 固定高度
+        # 異常資訊欄已隱藏（功能保留，移除 pack 即不顯示）
+        # self.error_frame.pack(fill=tk.X, padx=5, pady=5)
+        # self.error_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        # self.error_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        # self.error_text.config(height=7)
+
+        # 打滑門檻滑桿（異常資訊下方、畫布上方）
+        self._skid_slider_frame.pack(fill=tk.X, padx=5, pady=(0, 2))
 
         self.canvas_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         self.output_canvas.grid(row=0, column=0, sticky="nsew")
@@ -1630,8 +1651,15 @@ class MapPlotUI:
 
         return img
 
-    def _update_skid_ranking(self, floor_label=None):
-        """根據 highlight_log_df 更新右側面板指定樓層的打滑次數排名"""
+    def _update_skid_ranking(self, floor_label=None, selected_dates=None, addr_ids=None, sec_ids=None):
+        """根據 highlight_log_df 更新右側面板指定樓層的打滑次數排名。
+
+        Args:
+            floor_label: '1F'/'2F'/'3F'，限制只看該樓層車輛
+            selected_dates: 日期清單，若提供則只計算這些日期的事件
+            addr_ids: 已過濾的 addressid 集合（滑桿門檻）；None 表示不限制
+            sec_ids:  已過濾的 sectionid 集合（滑桿門檻）；None 表示不限制
+        """
         if not hasattr(self, 'skid_rank_tree'):
             return
 
@@ -1657,6 +1685,7 @@ class MapPlotUI:
             df['number'] = df['number'].astype(str).str.strip()
             df = df[df['number'].str.len() > 0]
 
+            # 樓層過濾
             if floor_label and floor_label in _floor_check:
                 check = _floor_check[floor_label]
                 def _match(s):
@@ -1665,6 +1694,20 @@ class MapPlotUI:
                     except Exception:
                         return False
                 df = df[df['number'].apply(_match)]
+
+            # 日期過濾（滑桿觸發時傳入）
+            if selected_dates is not None:
+                df = df[df['start_date'].isin(selected_dates)]
+
+            # 依滑桿門檻過濾：只計算出現在 addr_ids / sec_ids 裡的事件
+            if addr_ids is not None or sec_ids is not None:
+                addr_set = set(str(a).strip() for a in (addr_ids or []))
+                sec_set = set(str(s).strip() for s in (sec_ids or []))
+                mask = (
+                    df['addressid'].astype(str).str.strip().isin(addr_set) |
+                    df['sectionid'].astype(str).str.strip().isin(sec_set)
+                )
+                df = df[mask]
 
             counts = df.groupby('number').size().reset_index(name='count')
             counts = counts.sort_values('count', ascending=False).reset_index(drop=True)
@@ -1839,8 +1882,9 @@ class MapPlotUI:
                 else:
                     logging.warning(f"無法為樓層 {self._current_floor} 產生施工區域圖層")
 
-            # 載入 highlight_log.csv
-            self._load_highlight_log(self.data_folder)
+            # 載入 highlight_log.csv（若尚未預載才重新讀取）
+            if not hasattr(self, 'highlight_log_df') or self.highlight_log_df is None:
+                self._load_highlight_log(self.data_folder)
 
             # 填充日期列表（根據樓層過濾）
             self._populate_date_list()
@@ -2214,29 +2258,67 @@ class MapPlotUI:
                 no_data_label.pack(pady=5, padx=5, anchor="w")
                 return
 
-            # 創建 checkbox 列表
-            for date in dates:
-                var = tk.IntVar(value=0)  # 預設不選中
+            # 以週為單位分組（ISO week，週一為起點）
+            from datetime import datetime
+            week_groups = {}  # {(iso_year, iso_week): [date_str, ...]}
+            for d in dates:
+                try:
+                    dt = datetime.strptime(d.strip(), "%Y/%m/%d")
+                except ValueError:
+                    try:
+                        dt = datetime.strptime(d.strip(), "%Y-%m-%d")
+                    except ValueError:
+                        continue
+                iso = dt.isocalendar()
+                key = (iso[0], iso[1])
+                week_groups.setdefault(key, []).append(d)
+
+            # 依週序排列，標籤顯示該週內實際有資料的首尾日期
+            def _fmt(ds):
+                try:
+                    dt = datetime.strptime(ds.strip(), "%Y/%m/%d")
+                    return f"{dt.month}/{dt.day}"
+                except Exception:
+                    return ds.strip()
+
+            self._week_to_dates = {}
+            for key in sorted(week_groups.keys()):
+                group = week_groups[key]
+                first, last = _fmt(group[0]), _fmt(group[-1])
+                label = f"W{key[1]:02d}  {first}~{last}" if first != last else f"W{key[1]:02d}  {first}"
+                self._week_to_dates[label] = week_groups[key]
+                var = tk.IntVar(value=0)
                 cb = ttk.Checkbutton(
                     self.date_checkbox_frame,
-                    text=date,
+                    text=label,
                     variable=var,
                     command=self._on_date_checkbox_changed
                 )
                 cb.pack(anchor="w", padx=1, pady=0)
-                self.date_checkboxes[date] = var
+                self.date_checkboxes[label] = var
 
             floor_info = f"樓層 {self._current_floor} " if hasattr(self, '_current_floor') and self._current_floor else ""
-            logging.info(f"已載入 {floor_info}{len(dates)} 個日期")
+            logging.info(f"已載入 {floor_info}{len(self._week_to_dates)} 週（共 {len(dates)} 個日期）")
 
         except Exception as e:
             logging.error(f"填充日期列表失敗: {e}")
+
+    def _get_selected_dates(self):
+        """回傳目前勾選週次所對應的所有日期字串列表"""
+        if not hasattr(self, 'date_checkboxes'):
+            return []
+        week_to_dates = getattr(self, '_week_to_dates', {})
+        result = []
+        for label, var in self.date_checkboxes.items():
+            if var.get() == 1:
+                result.extend(week_to_dates.get(label, [label]))
+        return result
 
     def _on_date_checkbox_changed(self):
         """當用戶變更 checkbox 時的處理"""
         try:
             # 獲取選中的日期
-            selected_dates = [date for date, var in self.date_checkboxes.items() if var.get() == 1]
+            selected_dates = self._get_selected_dates()
 
             if not selected_dates:
                 logging.info("未選擇任何日期")
@@ -2265,8 +2347,8 @@ class MapPlotUI:
     def _reload_highlights(self):
         """根據選擇的日期重新載入高亮並重繪地圖（僅更新方框圖層）"""
         try:
-            # 獲取當前選擇的日期（從 checkbox）
-            selected_dates = [date for date, var in self.date_checkboxes.items() if var.get() == 1] if hasattr(self, 'date_checkboxes') else []
+            # 獲取當前選擇的日期（從 checkbox，週次展開為實際日期）
+            selected_dates = self._get_selected_dates() if hasattr(self, 'date_checkboxes') else []
 
             # 更新狀態
             if selected_dates:
@@ -2274,8 +2356,17 @@ class MapPlotUI:
             else:
                 self._update_status("清除高亮...")
 
-            # 根據日期過濾高亮數據
-            addr_ids, sec_ids = self._get_highlights_by_dates(selected_dates)
+            # 計算 address 和 section 次數分佈，更新滑桿範圍（初始值=中位數，位置在正中央）
+            addr_counts, sec_counts = self._calc_highlight_counts(selected_dates)
+            self._skid_addr_counts = addr_counts
+            self._skid_sec_counts = sec_counts
+            self._update_skid_slider_range(addr_counts, sec_counts)
+
+            # 依目前滑桿門檻（0-100位置→實際次數）過濾 address 和 section highlights
+            pos = self._skid_slider_var.get() if hasattr(self, '_skid_slider_var') else 50
+            threshold = self._slider_pos_to_threshold(pos)
+            addr_ids = [aid for aid, cnt in addr_counts.items() if cnt >= threshold]
+            sec_ids = [sid for sid, cnt in sec_counts.items() if cnt >= threshold]
 
             # 轉換 id 型態（若原本是字串數字轉為 int）
             def cast_ids(lst):
@@ -2341,6 +2432,14 @@ class MapPlotUI:
                     if hasattr(self, 'data_folder') and self.data_folder:
                         self.plot_vehicle_map()
 
+            # 同步更新右側車輛排名，與地圖狀態保持一致
+            self._update_skid_ranking(
+                floor_label=getattr(self, '_current_floor', None),
+                selected_dates=selected_dates,
+                addr_ids=addr_ids,
+                sec_ids=sec_ids,
+            )
+
         except Exception as e:
             logging.error(f"重新載入高亮失敗: {e}")
 
@@ -2387,3 +2486,121 @@ class MapPlotUI:
             logging.error(f"過濾日期資料失敗: {e}")
 
         return addr_ids, sec_ids
+
+    def _calc_highlight_counts(self, selected_dates):
+        """計算各 addressid 和 sectionid 在選定日期中的出現次數。
+
+        Returns:
+            tuple: (addr_counts dict, sec_counts dict) — {id_str: count}
+        """
+        from collections import Counter
+        if not hasattr(self, 'highlight_log_df') or self.highlight_log_df is None:
+            return {}, {}
+        if not selected_dates:
+            return {}, {}
+        df = self.highlight_log_df
+        df = df[df['start_date'].isin(selected_dates)]
+        addrs = df['addressid'].astype(str).str.strip()
+        addrs = addrs[(addrs != '') & (addrs != 'nan')]
+        addr_counts = dict(Counter(addrs))
+        secs = df['sectionid'].astype(str).str.strip()
+        secs = secs[(secs != '') & (secs != 'nan')]
+        sec_counts = dict(Counter(secs))
+        return addr_counts, sec_counts
+
+    def _update_skid_slider_range(self, addr_counts, sec_counts):
+        """根據 address+section 次數分佈設定滑桿（0-100 正規化）。
+        位置 0 = 門檻最低（顯示全部），50 = 範圍中間值（永遠在正中央），100 = 最高重複率。
+        中間值 = (min + max) // 2，例如 1~4 取 2，1~5 取 3。
+        """
+        if not hasattr(self, '_skid_slider'):
+            return
+        all_counts = list(addr_counts.values()) + list(sec_counts.values())
+        if not all_counts:
+            self._skid_slider.config(from_=0, to=100, state=tk.DISABLED)
+            self._skid_slider_var.set(50)
+            self._skid_median = 1
+            self._skid_max_count = 1
+            return
+        min_c = max(min(all_counts), 1)
+        max_c = max(all_counts)
+        mid_c = max((min_c + max_c) // 2, 1)
+        self._skid_median = mid_c
+        self._skid_max_count = max_c
+        self._skid_slider.config(from_=0, to=100, state=tk.NORMAL)
+        self._skid_slider_var.set(50)
+        # 更新標籤顯示中間值門檻
+        self._skid_slider.config(label=f"打滑門檻 ≥{mid_c}次 (中間值:{mid_c} 最高:{max_c})")
+
+    def _slider_pos_to_threshold(self, pos):
+        """將滑桿位置 (0-100) 轉換為重複次數門檻。
+        0 → 1（顯示全部），50 → 中位數，100 → 最大值。
+        分段線性映射，確保 50 永遠對應中位數。
+        """
+        median_c = getattr(self, '_skid_median', 1)
+        max_c = getattr(self, '_skid_max_count', 1)
+        if pos <= 50:
+            # [0, 50] → [1, median_c]
+            t = 1 + (median_c - 1) * (pos / 50.0)
+        else:
+            # [50, 100] → [median_c, max_c]
+            t = median_c + (max_c - median_c) * ((pos - 50) / 50.0)
+        return max(1, int(round(t)))
+
+    def _on_skid_slider_changed(self, value):
+        """滑桿移動時，依重複率門檻同時過濾 address 和 section 高亮並更新 overlay。
+        向右 → 門檻升高 → 只顯示重複率高的點/路段；向左 → 門檻降低 → 顯示更多。
+        """
+        try:
+            threshold = self._slider_pos_to_threshold(int(float(value)))
+            # 動態更新滑桿標籤顯示當前門檻
+            if hasattr(self, '_skid_slider'):
+                median_c = getattr(self, '_skid_median', 1)
+                max_c = getattr(self, '_skid_max_count', 1)
+                self._skid_slider.config(label=f"打滑門檻 ≥{threshold}次 (中間值:{median_c} 最高:{max_c})")
+            addr_counts = getattr(self, '_skid_addr_counts', {})
+            sec_counts = getattr(self, '_skid_sec_counts', {})
+            if not addr_counts and not sec_counts:
+                return
+            addr_ids = [aid for aid, cnt in addr_counts.items() if cnt >= threshold]
+            sec_ids = [sid for sid, cnt in sec_counts.items() if cnt >= threshold]
+
+            def cast_ids(lst):
+                out = []
+                for v in lst:
+                    s = str(v).strip()
+                    out.append(int(s) if s.isdigit() else s)
+                return out
+
+            if not hasattr(self, 'vehicle_map_plotter'):
+                return
+            self.vehicle_map_plotter.set_highlight_address_ids(cast_ids(addr_ids))
+            self.vehicle_map_plotter.set_highlight_section_ids(cast_ids(sec_ids))
+            if self.vehicle_map_plotter.regenerate_overlay():
+                self._overlay_pil_img = self.vehicle_map_plotter.get_overlay_image()
+                result_img = self._base_pil_img.copy() if hasattr(self, '_base_pil_img') and self._base_pil_img else None
+                if result_img and hasattr(self, '_zone_pil_img') and self._zone_pil_img:
+                    zone_img = self._zone_pil_img
+                    if zone_img.size != result_img.size:
+                        zone_img = zone_img.resize(result_img.size, Image.LANCZOS)
+                    result_img = Image.alpha_composite(result_img, zone_img)
+                if result_img and self._overlay_pil_img:
+                    overlay_img = self._overlay_pil_img
+                    if overlay_img.size != result_img.size:
+                        overlay_img = overlay_img.resize(result_img.size, Image.LANCZOS)
+                    result_img = Image.alpha_composite(result_img, overlay_img)
+                self._combined_pil_img = result_img
+                if hasattr(self, '_show_highlight_var') and self._show_highlight_var.get() == 1 and self._combined_pil_img:
+                    self.show_image_on_canvas(self._combined_pil_img)
+                elif hasattr(self, '_base_pil_img') and self._base_pil_img:
+                    self.show_image_on_canvas(self._base_pil_img)
+            # 同步更新右側車輛排名（依相同的日期與門檻過濾）
+            selected_dates = self._get_selected_dates() if hasattr(self, 'date_checkboxes') else []
+            self._update_skid_ranking(
+                floor_label=getattr(self, '_current_floor', None),
+                selected_dates=selected_dates,
+                addr_ids=addr_ids,
+                sec_ids=sec_ids,
+            )
+        except Exception as e:
+            logging.error(f"打滑滑桿過濾失敗: {e}")
