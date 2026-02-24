@@ -127,7 +127,7 @@ class MapPlotUI:
     def _setup_window(self):
         """設定視窗屬性"""
         self.root.minsize(300, 200)
-        self.root.title("地圖繪製工具")
+        self.root.title("打滑數據顯示工具-V1.0.0")
         
     def _create_plotters(self):
         """建立繪圖器物件"""
@@ -152,7 +152,7 @@ class MapPlotUI:
         self.status_label.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5, pady=5)
 
         # 匯出按鈕
-        self.export_btn = ttk.Button(self.top_frame, text="匯出圖片", command=self._export_canvas_image)
+        self.export_btn = ttk.Button(self.top_frame, text="匯出顯示圖片", command=self._export_canvas_image)
         self.export_btn.pack(side=tk.RIGHT, padx=5, pady=5)
 
         # 進度條
