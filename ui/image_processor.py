@@ -343,6 +343,72 @@ class ImageProcessor:
         self.ui._highlight_popup = popup
         popup.after(4000, lambda: popup.destroy() if popup.winfo_exists() else None)
 
+    def highlight_vehicle_boxes(self, vehicle_number, addr_ids, sec_ids):
+        """在畫布上高亮顯示特定車輛的打滑方框（黃色方框，4 秒後自動清除）"""
+        try:
+            plotter = getattr(self.ui, 'vehicle_map_plotter', None)
+            if not plotter:
+                return
+            hit_areas = getattr(plotter, 'highlight_hit_areas', [])
+            xlim = getattr(plotter, '_ax_xlim', None)
+            ylim = getattr(plotter, '_ax_ylim', None)
+            base_img = getattr(self.ui, '_base_pil_img', None)
+            if not hit_areas or not xlim or not ylim or not base_img:
+                return
+
+            # 清除上一次的高亮
+            self._clear_vehicle_highlights()
+
+            img_w, img_h = base_img.size
+            scale = self.ui._image_scale
+            canvas = self.ui.output_canvas
+
+            items_created = []
+            for area in hit_areas:
+                aid = str(area['id']).strip()
+                if area['type'] == 'address' and aid in addr_ids:
+                    match = True
+                elif area['type'] == 'section' and aid in sec_ids:
+                    match = True
+                else:
+                    match = False
+                if not match:
+                    continue
+
+                # 資料座標 → 畫布像素座標
+                cx1 = (area['xmin'] - xlim[0]) / (xlim[1] - xlim[0]) * img_w * scale
+                cx2 = (area['xmax'] - xlim[0]) / (xlim[1] - xlim[0]) * img_w * scale
+                cy1 = (ylim[1] - area['ymax']) / (ylim[1] - ylim[0]) * img_h * scale
+                cy2 = (ylim[1] - area['ymin']) / (ylim[1] - ylim[0]) * img_h * scale
+
+                rect_id = canvas.create_rectangle(
+                    cx1, cy1, cx2, cy2,
+                    outline='green', width=4, tags='vehicle_highlight'
+                )
+                items_created.append(rect_id)
+
+            self.ui._vehicle_highlight_items = items_created
+
+            if items_created:
+                logging.info(f"車輛 {vehicle_number}: 高亮 {len(items_created)} 個打滑方框")
+            else:
+                logging.info(f"車輛 {vehicle_number}: 在目前畫布上找不到對應的打滑方框")
+        except Exception as e:
+            logging.error(f"高亮車輛方框失敗: {e}")
+
+    def _clear_vehicle_highlights(self):
+        """清除車輛高亮方框"""
+        try:
+            items = getattr(self.ui, '_vehicle_highlight_items', [])
+            for item_id in items:
+                try:
+                    self.ui.output_canvas.delete(item_id)
+                except Exception:
+                    pass
+            self.ui._vehicle_highlight_items = []
+        except Exception as e:
+            logging.error(f"清除高亮方框失敗: {e}")
+
     def export_canvas_image(self):
         """匯出當前畫布畫面（含圖例），讓使用者選擇儲存位置"""
         if not hasattr(self.ui, '_base_pil_img') or self.ui._base_pil_img is None:

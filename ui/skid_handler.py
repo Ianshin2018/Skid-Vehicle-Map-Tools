@@ -59,6 +59,7 @@ class SkidHandler:
             label="重複打滑門檻 (address/section 重複率≥)"
         )
         self.ui._skid_slider_var.set(50)
+        self._set_rank_tree_clickable(False)
 
     def show_skid_slider(self):
         """顯示打滑門檻滑桿"""
@@ -244,6 +245,9 @@ class SkidHandler:
     def reload_highlights(self, selected_dates):
         """根據選擇的日期重新載入打滑方框並重繪地圖"""
         try:
+            # 依日期是否選擇，更新排名表格可點擊狀態
+            self._set_rank_tree_clickable(bool(selected_dates))
+
             # 更新狀態
             if selected_dates:
                 status_msg = f"更新打滑方框 ({len(selected_dates)} 個日期)..."
@@ -381,6 +385,64 @@ class SkidHandler:
         secs = secs[(secs != '') & (secs != 'nan')]
         sec_counts = dict(Counter(secs))
         return addr_counts, sec_counts
+
+    def _set_rank_tree_clickable(self, enabled):
+        """切換排名表格是否可點擊（透過 cursor 視覺提示與 selectmode）"""
+        if not hasattr(self.ui, 'skid_rank_tree'):
+            return
+        if enabled:
+            self.ui.skid_rank_tree.config(cursor="hand2", selectmode="browse")
+        else:
+            self.ui.skid_rank_tree.config(cursor="", selectmode="none")
+
+    def on_show_vehicle_skid_changed(self):
+        """顯示車輛打滑位置 checkbox 切換時的處理"""
+        enabled = getattr(self.ui, '_show_vehicle_skid_var', None)
+        if enabled and enabled.get() == 0:
+            # 取消勾選 → 清除畫布上的高亮
+            self.ui._image_processor._clear_vehicle_highlights()
+
+    def on_vehicle_rank_click(self, event):
+        """點擊右側車輛排名列時，在畫布上高亮該車輛的打滑方框"""
+        try:
+            # 未勾選「顯示車輛打滑位置」時不作動
+            show_var = getattr(self.ui, '_show_vehicle_skid_var', None)
+            if not show_var or show_var.get() == 0:
+                return
+
+            tree = self.ui.skid_rank_tree
+            item = tree.identify_row(event.y)
+            if not item:
+                return
+            values = tree.item(item, 'values')
+            if not values or len(values) < 2:
+                return
+            vehicle_number = str(values[1]).strip()
+
+            if not hasattr(self.ui, 'highlight_log_df') or self.ui.highlight_log_df is None:
+                return
+
+            df = self.ui.highlight_log_df.copy()
+            df['number'] = df['number'].astype(str).str.strip()
+
+            selected_dates = self.get_selected_dates()
+            if not selected_dates:
+                return
+
+            df = df[df['start_date'].isin(selected_dates)]
+            df = df[df['number'] == vehicle_number]
+
+            addr_ids = set(df['addressid'].astype(str).str.strip())
+            addr_ids.discard('')
+            addr_ids.discard('nan')
+
+            sec_ids = set(df['sectionid'].astype(str).str.strip())
+            sec_ids.discard('')
+            sec_ids.discard('nan')
+
+            self.ui._image_processor.highlight_vehicle_boxes(vehicle_number, addr_ids, sec_ids)
+        except Exception as e:
+            logging.error(f"點擊車輛排名失敗: {e}")
 
     def get_highlights_by_dates(self, selected_dates):
         """根據選擇的日期獲取打滑方框的 address 和 section IDs"""

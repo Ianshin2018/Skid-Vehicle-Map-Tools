@@ -169,6 +169,15 @@ class MapPlotUI:
         self._skid_floor_label = ttk.Label(self.right_panel, text="請點選樓層按鈕")
         self._skid_floor_label.pack(pady=(5, 2), padx=5, anchor="w")
 
+        self._show_vehicle_skid_var = tk.IntVar(value=0)
+        self._show_vehicle_skid_check = ttk.Checkbutton(
+            self.right_panel,
+            text="顯示車輛打滑位置(先選擇日期才可顯示)",
+            variable=self._show_vehicle_skid_var,
+            command=self._on_show_vehicle_skid_changed
+        )
+        self._show_vehicle_skid_check.pack(pady=(0, 2), padx=5, anchor="w")
+
         _skid_frame = ttk.Frame(self.right_panel)
         _skid_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
@@ -176,7 +185,7 @@ class MapPlotUI:
             _skid_frame,
             columns=("rank", "vehicle", "count"),
             show="headings",
-            selectmode="none"
+            selectmode="browse"
         )
         self.skid_rank_tree.heading("rank", text="名次")
         self.skid_rank_tree.heading("vehicle", text="車號")
@@ -189,6 +198,7 @@ class MapPlotUI:
         self.skid_rank_tree.config(yscrollcommand=_skid_sb.set)
         self.skid_rank_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         _skid_sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.skid_rank_tree.bind("<ButtonRelease-1>", self._on_vehicle_rank_click)
 
         # === 左側面板：日期選擇 ===
         self._date_filter.create_date_panel(self.left_panel)
@@ -371,6 +381,12 @@ class MapPlotUI:
     
     def _apply_skid_threshold(self, value):
         return self._skid_handler.apply_skid_threshold(value)
+
+    def _on_vehicle_rank_click(self, event):
+        return self._skid_handler.on_vehicle_rank_click(event)
+
+    def _on_show_vehicle_skid_changed(self):
+        return self._skid_handler.on_show_vehicle_skid_changed()
     
     def _update_status(self, message):
         return self._preload_manager.update_status(message)
@@ -444,7 +460,7 @@ class MapPlotUI:
             self.cargo_map_plotter.save_path = map_files['save_path']
             self.cargo_map_plotter.p_port = map_files['port']
             self.cargo_map_plotter.p_shelf = map_files['shelf']
-                                            
+
             logging.info(f"已選擇資料夾: {folder_path}")
             messagebox.showinfo("成功", "已成功載入所有必要檔案並驗證欄位格式")
             
@@ -757,7 +773,7 @@ class MapPlotUI:
                     self.show_image_on_canvas(self._base_pil_img)
 
             self._update_status(f"就緒 - {self._current_floor}")
-            self._update_skid_ranking(self._current_floor)
+            self._update_skid_ranking(self._current_floor, selected_dates=[])
         else:
             # 沒有快取
             self._update_status(f"載入樓層 {self._current_floor}（完整載入）...")
@@ -765,7 +781,7 @@ class MapPlotUI:
             if self.data_folder:
                 self._populate_date_list()
                 self.plot_vehicle_map()
-            self._update_skid_ranking(self._current_floor)
+            self._update_skid_ranking(self._current_floor, selected_dates=[])
 
     def _on_closing(self):
         """關閉視窗時的處理"""
