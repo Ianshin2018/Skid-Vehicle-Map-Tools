@@ -114,7 +114,63 @@ class MapPlotUI:
     def _setup_window(self):
         """設定視窗屬性"""
         self.root.minsize(300, 200)
-        self.root.title("打滑數據顯示工具-V1.0.0")
+        self.root.title("打滑數據顯示工具-V1.0.3")
+        self._create_menu_bar()
+
+    def _create_menu_bar(self):
+        """建立功能表列（檔案、顯示選單）"""
+        menubar = tk.Menu(self.root)
+        self.root.config(menu=menubar)
+
+        # 檔案選單
+        file_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="檔案", menu=file_menu)
+        file_menu.add_command(label="匯出圖片", command=self._export_canvas_image)
+        file_menu.add_separator()
+        file_menu.add_command(label="結束", command=self._on_closing)
+
+        # 顯示選單
+        display_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="顯示", menu=display_menu)
+        
+        # 施工區域
+        self._menu_show_zone_var = tk.IntVar(value=1)
+        display_menu.add_checkbutton(
+            label="施工區域",
+            variable=self._menu_show_zone_var,
+            command=self._on_menu_zone_toggled
+        )
+        
+        # 打滑位置
+        self._menu_show_highlight_var = tk.IntVar(value=1)
+        display_menu.add_checkbutton(
+            label="打滑位置",
+            variable=self._menu_show_highlight_var,
+            command=self._on_menu_highlight_toggled
+        )
+
+    def _on_menu_zone_toggled(self):
+        """功能表顯示施工區域切換"""
+        if hasattr(self, '_show_zone_var'):
+            self._show_zone_var.set(self._menu_show_zone_var.get())
+        else:
+            self._show_zone_var = tk.IntVar(value=self._menu_show_zone_var.get())
+        self._toggle_layers()
+
+    def _on_menu_highlight_toggled(self):
+        """功能表顯示打滑位置切換"""
+        if hasattr(self, '_show_highlight_var'):
+            self._show_highlight_var.set(self._menu_show_highlight_var.get())
+        else:
+            self._show_highlight_var = tk.IntVar(value=self._menu_show_highlight_var.get())
+        self._toggle_layers()
+
+    def _sync_menu_checkboxes(self):
+        """同步功能表核取方塊狀態"""
+        if hasattr(self, '_show_zone_var'):
+            self._menu_show_zone_var.set(self._show_zone_var.get())
+        if hasattr(self, '_show_highlight_var'):
+            self._menu_show_highlight_var.set(self._show_highlight_var.get())
 
     def _setup_logging(self):
         """設定日誌"""
@@ -172,7 +228,7 @@ class MapPlotUI:
         self._show_vehicle_skid_var = tk.IntVar(value=0)
         self._show_vehicle_skid_check = ttk.Checkbutton(
             self.right_panel,
-            text="顯示車輛打滑位置(先選擇日期才可顯示)",
+            text="顯示車輛位置",
             variable=self._show_vehicle_skid_var,
             command=self._on_show_vehicle_skid_changed
         )
@@ -245,9 +301,31 @@ class MapPlotUI:
         # 縮放按鈕
         self.zoom_in_btn = tk.Button(self.canvas_frame, text="+", width=2, command=self._zoom_in)
         self.zoom_out_btn = tk.Button(self.canvas_frame, text="-", width=2, command=self._zoom_out)
+        self.zoom_full_btn = tk.Button(self.canvas_frame, text="全圖", width=3, command=self._zoom_full)
 
-        # 匯出按鈕（放置於畫布右下角）
-        self.export_btn = ttk.Button(self.canvas_frame, text="匯出顯示圖片", command=self._export_canvas_image)
+        # 放大鏡 checkbox 和顯示區域
+        self._magnifier_var = tk.IntVar(value=0)
+        self._magnifier_check = tk.Checkbutton(
+            self.canvas_frame,
+            text="放大鏡",
+            variable=self._magnifier_var,
+            command=self._toggle_magnifier
+        )
+        
+        # 放大鏡顯示區域 (160x160)
+        self.magnifier_canvas = tk.Canvas(
+            self.canvas_frame,
+            width=160,
+            height=160,
+            bg="gray",
+            highlightthickness=1,
+            highlightbackground="black"
+        )
+        
+        # 初始化放大鏡相關變數
+        self._magnifier_enabled = False
+        self._magnifier_last_pos = None
+        self._magnifier_after_id = None
         
         # 事件綁定
         self.output_canvas.bind("<Configure>", self._image_processor._on_canvas_resize)
@@ -257,6 +335,7 @@ class MapPlotUI:
         self.output_canvas.bind("<MouseWheel>", self._image_processor._on_mousewheel)
         self.output_canvas.bind("<Button-4>", self._image_processor._on_mousewheel)
         self.output_canvas.bind("<Button-5>", self._image_processor._on_mousewheel)
+        self.output_canvas.bind("<Motion>", self._image_processor._on_canvas_mouse_move)
 
         # 樓層按鈕
         self.floor_buttons = {}
@@ -274,6 +353,13 @@ class MapPlotUI:
                 command=lambda f=folder: self.load_and_plot_vehicle_map(f)
             )
             self.floor_buttons[label] = btn
+
+        # 匯出按鈕（初始隱藏，點選樓層後才顯示於畫布下方）
+        self.export_btn = ttk.Button(
+            self.canvas_frame,
+            text="匯出圖片",
+            command=self._export_canvas_image
+        )
 
     def _create_checkbutton(self):
         """建立核取方塊"""
@@ -324,6 +410,7 @@ class MapPlotUI:
         canvas_w = self.output_canvas.winfo_width()
         self.zoom_in_btn.place(in_=self.output_canvas, x=canvas_w-50, y=10)
         self.zoom_out_btn.place(in_=self.output_canvas, x=canvas_w-25, y=10)
+        self.zoom_full_btn.place(in_=self.output_canvas, x=canvas_w-85, y=10)
 
     # === 代理方法：讓原有程式碼向後相容 ===
     
@@ -344,6 +431,18 @@ class MapPlotUI:
     
     def _zoom_out(self):
         return self._image_processor.zoom_out()
+    
+    def _zoom_full(self):
+        """顯示全圖（重置縮放比例）"""
+        return self._image_processor.zoom_full()
+    
+    def _toggle_magnifier(self):
+        """切換放大鏡功能"""
+        self._magnifier_enabled = self._magnifier_var.get() == 1
+        if not self._magnifier_enabled:
+            # 清除放大鏡顯示
+            if hasattr(self, 'magnifier_canvas'):
+                self.magnifier_canvas.delete("all")
     
     def _export_canvas_image(self):
         return self._image_processor.export_canvas_image()

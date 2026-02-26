@@ -23,6 +23,13 @@ class ImageProcessor:
     def show_image_on_canvas(self, pil_img):
         """將 PIL 影像依照畫布大小與縮放比例縮放並致中顯示於 output_canvas 上"""
         self.ui._original_pil_img = pil_img  # 儲存原始圖片
+        # 全圖模式：每次更新圖片時維持 fit-to-canvas 縮放比例
+        if getattr(self.ui, '_fullmap_mode', False):
+            canvas_w = self.ui.output_canvas.winfo_width()
+            canvas_h = self.ui.output_canvas.winfo_height()
+            if canvas_w > 1 and canvas_h > 1:
+                img_w, img_h = pil_img.size
+                self.ui._image_scale = min(canvas_w / img_w, canvas_h / img_h)
         self._draw_scaled_image()
 
     def _draw_scaled_image(self):
@@ -42,30 +49,138 @@ class ImageProcessor:
         self.ui._tk_img = ImageTk.PhotoImage(resized_img)
         self.ui.output_canvas.delete("all")
 
-        # 讓圖片左上角永遠在(0,0)，scrollregion設為圖片大小
-        self.ui.output_canvas.create_image(0, 0, anchor="nw", image=self.ui._tk_img)
-        self.ui.output_canvas.config(scrollregion=(0, 0, new_w, new_h))
+        if getattr(self.ui, '_fullmap_mode', False):
+            # 全圖模式：圖片置中，canvas 背景改為灰色
+            x_offset = max(0, (canvas_width - new_w) // 2)
+            y_offset = max(0, (canvas_height - new_h) // 2)
+            self.ui.output_canvas.config(bg='lightgray')
+            # scrollregion = 圖片兩側留白後的總寬高，確保不產生捲動
+            scroll_w = new_w + 2 * x_offset
+            scroll_h = new_h + 2 * y_offset
+        else:
+            x_offset, y_offset = 0, 0
+            self.ui.output_canvas.config(bg='white')
+            scroll_w, scroll_h = new_w, new_h
 
-        if getattr(self.ui, "_canvas_first_show", True):
-            if new_w > canvas_width:
-                self.ui.output_canvas.xview_moveto((new_w - canvas_width) / 2 / new_w)
+        # 記錄偏移量供右鍵座標換算使用
+        self.ui._img_canvas_offset = (x_offset, y_offset)
+        self.ui.output_canvas.create_image(x_offset, y_offset, anchor="nw", image=self.ui._tk_img)
+        self.ui.output_canvas.config(scrollregion=(0, 0, scroll_w, scroll_h))
+
+        # 全圖模式或首次顯示時，自動置中視窗
+        if getattr(self.ui, "_canvas_first_show", True) or getattr(self.ui, '_fullmap_mode', False):
+            if scroll_w > canvas_width:
+                self.ui.output_canvas.xview_moveto((scroll_w - canvas_width) / 2 / scroll_w)
             else:
                 self.ui.output_canvas.xview_moveto(0)
-            if new_h > canvas_height:
-                self.ui.output_canvas.yview_moveto((new_h - canvas_height) / 2 / new_h)
+            if scroll_h > canvas_height:
+                self.ui.output_canvas.yview_moveto((scroll_h - canvas_height) / 2 / scroll_h)
             else:
                 self.ui.output_canvas.yview_moveto(0)
-            self.ui._canvas_first_show = False
+            if getattr(self.ui, "_canvas_first_show", True):
+                self.ui._canvas_first_show = False
 
     def zoom_in(self):
-        """放大影像"""
+        """放大影像（退出全圖模式）"""
+        self.ui._fullmap_mode = False
         self.ui._image_scale = min(self.ui._image_scale * 1.2, 5.0)
         self._draw_scaled_image()
 
     def zoom_out(self):
-        """縮小影像"""
+        """縮小影像（退出全圖模式）"""
+        self.ui._fullmap_mode = False
         self.ui._image_scale = max(self.ui._image_scale / 1.2, 0.01)
         self._draw_scaled_image()
+
+    def zoom_full(self):
+        """全圖模式：計算 fit-to-canvas 縮放比例，整張地圖置中顯示"""
+        if not hasattr(self.ui, '_original_pil_img') or self.ui._original_pil_img is None:
+            return
+        canvas_w = self.ui.output_canvas.winfo_width()
+        canvas_h = self.ui.output_canvas.winfo_height()
+        if canvas_w <= 1 or canvas_h <= 1:
+            self.ui.output_canvas.update()
+            canvas_w = self.ui.output_canvas.winfo_width()
+            canvas_h = self.ui.output_canvas.winfo_height()
+        img_w, img_h = self.ui._original_pil_img.size
+        self.ui._image_scale = min(canvas_w / img_w, canvas_h / img_h)
+        self.ui._fullmap_mode = True
+        self._draw_scaled_image()
+
+    def _on_canvas_mouse_move(self, event):
+        """處理滑鼠移動事件，用於放大鏡功能"""
+        if not getattr(self.ui, '_magnifier_enabled', False):
+            return
+        
+        if not hasattr(self.ui, '_original_pil_img') or self.ui._original_pil_img is None:
+            return
+        
+        # 取消上一次尚未執行的更新任務
+        if hasattr(self.ui, '_magnifier_after_id') and self.ui._magnifier_after_id:
+            try:
+                self.ui.root.after_cancel(self.ui._magnifier_after_id)
+            except Exception:
+                pass
+        
+        # 50ms 防抖延遲
+        self.ui._magnifier_after_id = self.ui.root.after(50, lambda: self._update_magnifier(event))
+
+    def _update_magnifier(self, event):
+        """更新放大鏡顯示（50ms 防抖延遲後執行）"""
+        try:
+            # 位置快取機制：滑鼠移動 <10 像素時跳過更新
+            last_pos = getattr(self.ui, '_magnifier_last_pos', None)
+            if last_pos is not None:
+                dx = event.x - last_pos[0]
+                dy = event.y - last_pos[1]
+                if abs(dx) < 10 and abs(dy) < 10:
+                    return
+            
+            # 更新位置快取
+            self.ui._magnifier_last_pos = (event.x, event.y)
+            
+            # 取得滑鼠在 canvas 上的座標
+            canvas_x = self.ui.output_canvas.canvasx(event.x)
+            canvas_y = self.ui.output_canvas.canvasy(event.y)
+            
+            # 取得原始圖片
+            orig_img = self.ui._original_pil_img
+            if orig_img is None:
+                return
+            
+            # 計算在原始圖片上的座標
+            scale = getattr(self.ui, '_image_scale', 0.2)
+            img_w, img_h = orig_img.size
+            img_px_x = canvas_x / scale
+            img_px_y = canvas_y / scale
+            
+            # 放大鏡參數
+            magnifier_size = 160  # 160x160 像素
+            magnifier_zoom = 8    # 8 倍放大
+            
+            # 計算要擷取的區域（以滑鼠位置為中心）
+            half_size = (magnifier_size // 2) // magnifier_zoom
+            left = max(0, int(img_px_x) - half_size)
+            top = max(0, int(img_px_y) - half_size)
+            right = min(img_w, int(img_px_x) + half_size)
+            bottom = min(img_h, int(img_px_y) + half_size)
+            
+            if right <= left or bottom <= top:
+                return
+            
+            # 擷取區域影像
+            cropped = orig_img.crop((left, top, right, bottom))
+            
+            # 放大並顯示
+            magnified = cropped.resize((magnifier_size, magnifier_size), Image.LANCZOS)
+            self.ui._magnifier_tk_img = ImageTk.PhotoImage(magnified)
+            
+            # 繪製到放大鏡 canvas
+            self.ui.magnifier_canvas.delete("all")
+            self.ui.magnifier_canvas.create_image(0, 0, anchor="nw", image=self.ui._magnifier_tk_img)
+            
+        except Exception as e:
+            logging.error(f"更新放大鏡失敗: {e}")
 
     def zoom_image(self, in_out):
         """縮放畫布上的影像
@@ -102,17 +217,29 @@ class ImageProcessor:
 
     def _on_canvas_resize(self, event):
         """畫布大小變化時，將放大縮小按鈕固定在右上角"""
-        # 右邊預留一點間距
         btn_y = 10
         btn_margin = 10
         btn_spacing = 5
-        btn_width = self.ui.zoom_in_btn.winfo_reqwidth()
+        btn_w_sm = self.ui.zoom_in_btn.winfo_reqwidth()      # +/- 按鈕寬度
+        btn_w_full = self.ui.zoom_full_btn.winfo_reqwidth()   # 全圖 按鈕寬度
         canvas_w = event.width
-        self.ui.zoom_in_btn.place(in_=self.ui.output_canvas, x=canvas_w - btn_width*2 - btn_spacing - btn_margin, y=btn_y)
-        self.ui.zoom_out_btn.place(in_=self.ui.output_canvas, x=canvas_w - btn_width - btn_margin, y=btn_y)
+        # 右→左排列：[zoom_out] [zoom_in] [zoom_full]
+        self.ui.zoom_out_btn.place(in_=self.ui.output_canvas,
+                                   x=canvas_w - btn_w_sm - btn_margin, y=btn_y)
+        self.ui.zoom_in_btn.place(in_=self.ui.output_canvas,
+                                  x=canvas_w - btn_w_sm*2 - btn_spacing - btn_margin, y=btn_y)
+        self.ui.zoom_full_btn.place(in_=self.ui.output_canvas,
+                                    x=canvas_w - btn_w_sm*2 - btn_w_full - btn_spacing*2 - btn_margin, y=btn_y)
         # 固定樓層按鈕在畫布左上角
         for idx, btn in enumerate(self.ui.floor_buttons.values()):
             btn.place(in_=self.ui.output_canvas, x=10, y=10+idx*35)
+        # 全圖模式下視窗縮放時重新計算 fit 比例
+        if getattr(self.ui, '_fullmap_mode', False) and getattr(self.ui, '_original_pil_img', None):
+            img_w, img_h = self.ui._original_pil_img.size
+            canvas_h = self.ui.output_canvas.winfo_height()
+            if event.width > 1 and canvas_h > 1:
+                self.ui._image_scale = min(event.width / img_w, canvas_h / img_h)
+                self._draw_scaled_image()
 
     def _on_mousewheel(self, event):
         """
@@ -175,7 +302,8 @@ class ImageProcessor:
         img_x = canvas_x / old_scale
         img_y = canvas_y / old_scale
 
-        # 設定新比例並重繪
+        # 滾輪縮放：退出全圖模式，設定新比例並重繪
+        self.ui._fullmap_mode = False
         self.ui._image_scale = new_scale
         self._draw_scaled_image()
 
@@ -289,12 +417,13 @@ class ImageProcessor:
         if not hit_areas or not xlim or not ylim or not base_img:
             return
 
-        # canvas 座標 → 全解析度圖片像素座標
+        # canvas 座標 → 全解析度圖片像素座標（扣除全圖模式的置中偏移）
         cx = self.ui.output_canvas.canvasx(event.x)
         cy = self.ui.output_canvas.canvasy(event.y)
         scale = self.ui._image_scale
-        img_px_x = cx / scale
-        img_px_y = cy / scale
+        off_x, off_y = getattr(self.ui, '_img_canvas_offset', (0, 0))
+        img_px_x = (cx - off_x) / scale
+        img_px_y = (cy - off_y) / scale
 
         # 圖片像素 → matplotlib data 座標
         img_w, img_h = base_img.size

@@ -14,6 +14,11 @@ from PIL import Image
 plt.rcParams['font.sans-serif'] = ['Microsoft YaHei', 'Arial Unicode MS', 'DejaVu Sans', 'sans-serif']  # 嘗試多種可能的字型
 plt.rcParams['axes.unicode_minus'] = False
 
+# 統一輸出圖片尺寸（英寸）：不足部分以灰底填補
+_CANVAS_W = 95
+_CANVAS_H = 160
+_CANVAS_GRAY = 'lightgray'
+
 
 class PlotterBase:
     """
@@ -87,26 +92,55 @@ class PlotterBase:
         self.preprocess_address()
         self.preprocess_section()
 
-        # 建立 figure/ax，傳給子類繪圖
-        self.figure, ax = plt.subplots()
+        # 建立固定尺寸 figure/ax（統一 95×160 英寸，不足部分灰底填補）
+        self.figure, ax = plt.subplots(figsize=(_CANVAS_W, _CANVAS_H))
+        self.figure.subplots_adjust(left=0, right=1, top=1, bottom=0)
+        self.figure.patch.set_facecolor(_CANVAS_GRAY)
         # 讓子類在傳入的 ax 上繪製主體
         self.plot(ax)
 
-        # --- 隱藏座標軸（移除刻度 / 比例尺外觀） ---
+        # --- 底圖資料 bounding box：白底矩形 + 計算置中偏移 ---
+        _pad = 20  # 留邊確保最外側站點不被裁切
+        _half_w = _CANVAS_W * 10 / 2   # 475 資料單位
+        _half_h = _CANVAS_H * 10 / 2   # 800 資料單位
+        _x_center = _half_w            # 預設值（置中於原點）
+        _y_center = _half_h
         try:
-            ax.set_axis_off()
+            if self.x_dict and self.y_dict:
+                x_vals = list(self.x_dict.values())
+                y_vals = list(self.y_dict.values())
+                x_min, x_max = min(x_vals), max(x_vals)
+                y_min, y_max = min(y_vals), max(y_vals)
+                _x_center = (x_min + x_max) / 2
+                _y_center = (y_min + y_max) / 2
+                # 疊加白底矩形，底圖範圍內保持原有白色背景
+                bg_rect = plt.Rectangle(
+                    (x_min - _pad, y_min - _pad),
+                    (x_max - x_min) + 2 * _pad,
+                    (y_max - y_min) + 2 * _pad,
+                    facecolor='white', edgecolor='none', zorder=0
+                )
+                ax.add_patch(bg_rect)
+        except Exception:
+            pass
+
+        # --- 以底圖中心為基準設定座標範圍，隱藏軸框，保留灰色背景 ---
+        try:
+            ax.set_xlim(_x_center - _half_w, _x_center + _half_w)
+            ax.set_ylim(_y_center - _half_h, _y_center + _half_h)
+            ax.set_facecolor(_CANVAS_GRAY)
             ax.tick_params(left=False, labelleft=False, bottom=False, labelbottom=False)
             for spine in ax.spines.values():
                 spine.set_visible(False)
+            self._ax_xlim = ax.get_xlim()
+            self._ax_ylim = ax.get_ylim()
         except Exception:
             pass
 
         # --- 儲存「原始輸出圖片」（第一圖層 - 底圖） ---
         try:
             buf = io.BytesIO()
-            # 儲存當前 figure（此時尚未加 highlight 方框）
-            # 使用 pad_inches=0 去除周圍空白邊距，facecolor 指定底色
-            self.figure.savefig(buf, format='png', bbox_inches='tight', pad_inches=0, facecolor='white')
+            self.figure.savefig(buf, format='png', pad_inches=0, facecolor=_CANVAS_GRAY)
             buf.seek(0)
             self.base_image = Image.open(buf).convert("RGBA").copy()
             buf.close()
@@ -123,16 +157,14 @@ class PlotterBase:
 
         if has_highlights:
             try:
-                # 獲取原 figure 的尺寸和坐標範圍
-                fig_size = self.figure.get_size_inches()
-                xlim = ax.get_xlim()
-                ylim = ax.get_ylim()
+                xlim = self._ax_xlim
+                ylim = self._ax_ylim
 
-                # 創建新的透明 figure（只用於繪製方框）
-                overlay_fig, overlay_ax = plt.subplots(figsize=fig_size)
+                # 創建新的透明 figure（只用於繪製方框，與底圖同尺寸）
+                overlay_fig, overlay_ax = plt.subplots(figsize=(_CANVAS_W, _CANVAS_H))
+                overlay_fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
                 overlay_ax.set_xlim(xlim)
                 overlay_ax.set_ylim(ylim)
-                overlay_ax.set_aspect(ax.get_aspect())
 
                 # 隱藏座標軸
                 overlay_ax.set_axis_off()
@@ -145,7 +177,7 @@ class PlotterBase:
 
                 # 保存透明圖層
                 buf = io.BytesIO()
-                overlay_fig.savefig(buf, format='png', bbox_inches='tight', pad_inches=0,
+                overlay_fig.savefig(buf, format='png', pad_inches=0,
                                    facecolor='none', transparent=True)
                 buf.seek(0)
                 self.overlay_image = Image.open(buf).convert("RGBA").copy()
@@ -157,12 +189,6 @@ class PlotterBase:
             except Exception as e:
                 logging.warning(f"無法建立 overlay image: {e}")
                 self.overlay_image = None
-
-        # 可能需要刷新或調整座標
-        try:
-            ax.autoscale_view()
-        except Exception:
-            pass
 
     def _draw_zones_on_ax(self, ax):
         """在指定的 ax 上繪製淡藍色大方框（zone 區域）
@@ -383,16 +409,15 @@ class PlotterBase:
                 logging.warning("找不到原 figure 的 axes")
                 return False
 
-            # 獲取原 figure 的尺寸和坐標範圍
-            fig_size = self.figure.get_size_inches()
-            xlim = ax.get_xlim()
-            ylim = ax.get_ylim()
+            # 使用固定座標範圍（與底圖一致）
+            xlim = getattr(self, '_ax_xlim', ax.get_xlim())
+            ylim = getattr(self, '_ax_ylim', ax.get_ylim())
 
-            # 創建新的透明 figure（只用於繪製方框）
-            overlay_fig, overlay_ax = plt.subplots(figsize=fig_size)
+            # 創建新的透明 figure（只用於繪製方框，與底圖同尺寸）
+            overlay_fig, overlay_ax = plt.subplots(figsize=(_CANVAS_W, _CANVAS_H))
+            overlay_fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
             overlay_ax.set_xlim(xlim)
             overlay_ax.set_ylim(ylim)
-            overlay_ax.set_aspect(ax.get_aspect())
 
             # 隱藏座標軸
             overlay_ax.set_axis_off()
@@ -405,7 +430,7 @@ class PlotterBase:
 
             # 保存透明圖層
             buf = io.BytesIO()
-            overlay_fig.savefig(buf, format='png', bbox_inches='tight', pad_inches=0,
+            overlay_fig.savefig(buf, format='png', pad_inches=0,
                                facecolor='none', transparent=True)
             buf.seek(0)
             self.overlay_image = Image.open(buf).convert("RGBA").copy()

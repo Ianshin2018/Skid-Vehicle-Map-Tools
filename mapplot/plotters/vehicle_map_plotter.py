@@ -342,14 +342,7 @@ class VehicleMapPlotter(PlotterBase):
             self.x_dict = display_x_dict
             self.y_dict = display_y_dict
 
-        # 如果需要調整整體圖尺寸，可設定傳入 ax 的 figure size
-        try:
-            fig_width = max(display_x_dict.values()) / 10
-            fig_height = max(display_y_dict.values()) / 10
-            # 設定傳入 figure 的大小（單位: inches）
-            ax.figure.set_size_inches(max(6, fig_width), max(4, fig_height))
-        except Exception:
-            pass  # 若計算失敗則使用預設大小
+        # 圖片尺寸由 PlotterBase 統一設定為 95×160 英寸，此處不再調整
 
         # 繪圖參數...
         square_side_length = 2

@@ -171,15 +171,15 @@ class DataLoader:
             if hasattr(self.ui.vehicle_map_plotter, 'figure') and self.ui.vehicle_map_plotter.figure:
                 fig_size = self.ui.vehicle_map_plotter.figure.get_size_inches()
 
-            # 建立透明 figure
+            # 建立透明 figure（與底圖同尺寸）
             zone_fig, zone_ax = plt.subplots(figsize=fig_size)
+            zone_fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
 
             # 設定座標範圍（從 plotter 獲取）
             if hasattr(self.ui.vehicle_map_plotter, 'figure') and self.ui.vehicle_map_plotter.figure.axes:
                 orig_ax = self.ui.vehicle_map_plotter.figure.axes[0]
                 zone_ax.set_xlim(orig_ax.get_xlim())
                 zone_ax.set_ylim(orig_ax.get_ylim())
-                zone_ax.set_aspect(orig_ax.get_aspect())
 
             # 隱藏座標軸
             zone_ax.set_axis_off()
@@ -276,9 +276,9 @@ class DataLoader:
                 
                 logging.info(f"繪製了 {valid_count} 個施工區域框")
 
-            # 保存為圖像
+            # 保存為圖像（固定尺寸，不裁切）
             buf = io.BytesIO()
-            zone_fig.savefig(buf, format='png', bbox_inches='tight', pad_inches=0,
+            zone_fig.savefig(buf, format='png', pad_inches=0,
                            facecolor='none', transparent=True)
             buf.seek(0)
             zone_img = Image.open(buf).convert("RGBA").copy()
@@ -362,15 +362,15 @@ class DataLoader:
             if hasattr(self.ui.vehicle_map_plotter, 'figure') and self.ui.vehicle_map_plotter.figure:
                 fig_size = self.ui.vehicle_map_plotter.figure.get_size_inches()
 
-            # 建立透明 figure
+            # 建立透明 figure（與底圖同尺寸）
             zone_fig, zone_ax = plt.subplots(figsize=fig_size)
+            zone_fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
 
             # 設定座標範圍（從 plotter 獲取）
             if hasattr(self.ui.vehicle_map_plotter, 'figure') and self.ui.vehicle_map_plotter.figure.axes:
                 orig_ax = self.ui.vehicle_map_plotter.figure.axes[0]
                 zone_ax.set_xlim(orig_ax.get_xlim())
                 zone_ax.set_ylim(orig_ax.get_ylim())
-                zone_ax.set_aspect(orig_ax.get_aspect())
 
             # 隱藏座標軸
             zone_ax.set_axis_off()
@@ -502,9 +502,9 @@ class DataLoader:
                 
                 logging.info(f"繪製了 {valid_count} 個施工路段框")
 
-            # 保存為圖像
+            # 保存為圖像（固定尺寸，不裁切）
             buf = io.BytesIO()
-            zone_fig.savefig(buf, format='png', bbox_inches='tight', pad_inches=0,
+            zone_fig.savefig(buf, format='png', pad_inches=0,
                            facecolor='none', transparent=True)
             buf.seek(0)
             zone_img = Image.open(buf).convert("RGBA").copy()

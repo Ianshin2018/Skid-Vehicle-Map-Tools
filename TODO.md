@@ -1,30 +1,39 @@
-# TODO: 修改施工區域畫框邏輯
+# TODO List - 依照 README.md 修改程式
 
-## 任務：將施工區域改成畫出 zone.csv 內每個 addressID 的區域
+## 修改項目清單
 
-### 步驟 1: 修改 ui/map_plot_ui.py 中的 _load_zone_for_floor 方法
-- [x] 1.1 讀取 zone.csv 時檢查是否有 zone_name 欄位
-- [x] 1.2 如果有 zone_name，按分組畫框（每個 zone_name 一個大框）
-- [x] 1.3 如果沒有 zone_name，對每個 addressID 畫獨立小框
-- [x] 1.4 驗證每個 addressID 是否存在於 Address.csv 中
+### Phase 1: 版本與基本 UI 更新 ✅ 完成
+- [x] 1. 更新版本號為 V1.0.3
+- [x] 2. 建立功能列 (Menu Bar) - 檔案/顯示選單
+- [x] 3. 修正排名 checkbox 文字
 
-### 步驟 2: 新增 zoneSection.csv 處理方法 (_load_zone_section_for_floor)
-- [x] 2.1 讀取 zoneSection.csv 時檢查是否有 zone_name 欄位
-- [x] 2.2 如果有 zone_name，按分組畫框（每個 zone_name 一個大框）
-- [x] 2.3 如果沒有 zone_name，對每個路段畫獨立小框
-- [x] 2.4 驗證每個 FromAddressId 和 ToAddressId 是否存在於座標中
-- [x] 2.5 合併 zone 和 zone_section 圖層
+### Phase 2: 按鈕功能 ✅ 完成
+- [x] 4. 新增「全圖」按鈕
+- [x] 5. 新增放大鏡 checkbox
 
-### 步驟 3: 測試與驗證
-- [ ] 3.1 執行應用程式確認修改正常運作
-- [ ] 3.2 檢查 1F/2F/3F 的施工區域顯示正確
+### Phase 3: 放大鏡功能 ✅ 完成
+- [x] 6. 建立放大鏡顯示區域 (160x160, 右下角)
+- [x] 7. 實作 8 倍放大功能
+- [x] 8. 加入 50ms 防抖延遲
+- [x] 9. 位置快取機制 (<10 像素跳過更新)
 
-###  dependent Files:
-- ui/map_plot_ui.py (_load_zone_for_floor 方法)
-- ui/map_plot_ui.py (_load_zone_section_for_floor 方法 - 新增)
+### Phase 4: 其他功能 ✅ 完成
+- [x] 10. image_processor.py 新增 zoom_full() 方法
+- [x] 11. image_processor.py 新增放大鏡相關方法
 
-### 修改說明:
-- zone.csv: 如果有 `zone_name` 欄位，會按 zone_name 分組，每個分組畫一個大框；如果沒有，會對每個 addressID 畫一個獨立的小方框（8x8 大小）
-- zoneSection.csv: 如果有 `zone_name` 欄位，會按 zone_name 分組，每個分組畫一個大框；如果沒有，會對每個路段畫一個獨立的小方框
-- 兩層圖層會合併在一起顯示：施工位置（藍色）+ 施工路段（橙色）
+---
+
+## 已完成的修改摘要
+
+### ui/map_plot_ui.py:
+- 版本號: V1.0.0 → V1.0.3
+- 新增 Menu Bar (檔案、顯示選單)
+- 新增「全圖」按鈕 (zoom_full_btn)
+- 新增放大鏡 checkbox 和顯示區域
+- 排名 checkbox 文字從 "顯示車輛打滑位置(先選擇日期才可顯示)" 改為 "顯示車輛位置"
+
+### ui/image_processor.py:
+- 新增 zoom_full() 方法 - 重置縮放比例為預設值 0.2
+- 新增 _on_canvas_mouse_move() 方法 - 處理放大鏡滑鼠移動
+- 新增 _update_magnifier() 方法 - 更新放大鏡顯示 (8倍放大, 50ms防抖, 位置快取)
 
