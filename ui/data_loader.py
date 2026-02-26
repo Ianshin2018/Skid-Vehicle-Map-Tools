@@ -6,7 +6,7 @@ import os
 import logging
 import pandas as pd
 import io
-from PIL import Image
+from PIL import Image, ImageDraw
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 
@@ -228,7 +228,7 @@ class DataLoader:
                     width = (xmax - xmin) + 2 * padding
                     height = (ymax - ymin) + 2 * padding
                     
-                    # 繪製該 zone 的方框
+                    # 繪製淡藍色大方框：粗框 + 半透明填充
                     zone_rect = Rectangle(
                         (xmin, ymin), width, height,
                         linewidth=5,
@@ -258,9 +258,10 @@ class DataLoader:
                             y = y_dict[key]
                             
                             # 每個 addressID 畫一個小方框（以該點為中心）
-                            box_size = 8.0  # 方框大小
+                            box_size = 8.0
                             half_size = box_size / 2
                             
+                            # 繪製小方框
                             zone_rect = Rectangle(
                                 (x - half_size, y - half_size), box_size, box_size,
                                 linewidth=3,
@@ -292,6 +293,51 @@ class DataLoader:
         except Exception as e:
             logging.error(f"建立施工區域圖層失敗: {e}")
             return None
+
+    def _data_to_pixel(self, data_x, data_y, W, H, xlim, ylim):
+        """將資料座標轉換為像素座標
+        
+        Args:
+            data_x: 資料 X 座標
+            data_y: 資料 Y 座標
+            W: 圖片寬度（像素）
+            H: 圖片高度（像素）
+            xlim: X 座標範圍 (min, max)
+            ylim: Y 座標範圍 (min, max)
+            
+        Returns:
+            tuple: (pixel_x, pixel_y) 像素座標
+        """
+        px = (data_x - xlim[0]) / (xlim[1] - xlim[0]) * W
+        py = H - (data_y - ylim[0]) / (ylim[1] - ylim[0]) * H
+        return int(px), int(py)
+    
+    def _data_to_pixel_box(self, x1, y1, x2, y2, W, H, xlim, ylim):
+        """將資料座標的邊界框轉換為像素座標（確保順序正確）
+        
+        Args:
+            x1, y1: 第一個點的資料座標
+            x2, y2: 第二個點的資料座標
+            W: 圖片寬度（像素）
+            H: 圖片高度（像素）
+            xlim: X 座標範圍 (min, max)
+            ylim: Y 座標範圍 (min, max)
+            
+        Returns:
+            tuple: (px1, py1, px2, py2) 像素座標（確保 px2>=px1, py2>=py1）
+        """
+        px1 = int((x1 - xlim[0]) / (xlim[1] - xlim[0]) * W)
+        px2 = int((x2 - xlim[0]) / (xlim[1] - xlim[0]) * W)
+        py1 = int(H - (y1 - ylim[0]) / (ylim[1] - ylim[0]) * H)
+        py2 = int(H - (y2 - ylim[0]) / (ylim[1] - ylim[0]) * H)
+        
+        # 確保座標順序正確（rectangle 需要 x2>=x1, y2>=y1）
+        if px1 > px2:
+            px1, px2 = px2, px1
+        if py1 > py2:
+            py1, py2 = py2, py1
+            
+        return px1, py1, px2, py2
 
     def load_zone_section_for_floor(self, folder_path):
         """載入樓層的施工區域路段資料並產生圖層
@@ -336,8 +382,6 @@ class DataLoader:
             
             # 獲取路段資料
             section_ids = df_zone_section['SectionId'].str.strip().tolist()
-            from_addressids = df_zone_section['FromAddressId'].str.strip().tolist()
-            to_addressids = df_zone_section['ToAddressId'].str.strip().tolist()
             
             if not section_ids:
                 logging.warning("zoneSection CSV 沒有有效的 section id")
@@ -356,13 +400,11 @@ class DataLoader:
                 logging.warning("vehicle_map_plotter 沒有座標資料")
                 return None
 
-            # 建立透明圖層繪製 zone section 方框
-            # 獲取 figure 尺寸
+            # 建立透明 figure（與底圖同尺寸）
             fig_size = (10, 8)  # 預設尺寸
             if hasattr(self.ui.vehicle_map_plotter, 'figure') and self.ui.vehicle_map_plotter.figure:
                 fig_size = self.ui.vehicle_map_plotter.figure.get_size_inches()
 
-            # 建立透明 figure（與底圖同尺寸）
             zone_fig, zone_ax = plt.subplots(figsize=fig_size)
             zone_fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
 
@@ -426,7 +468,7 @@ class DataLoader:
                     width = (xmax - xmin) + 2 * padding
                     height = (ymax - ymin) + 2 * padding
                     
-                    # 繪製該 zone 的方框
+                    # 繪製淡藍色大方框：粗框 + 半透明填充
                     zone_rect = Rectangle(
                         (xmin, ymin), width, height,
                         linewidth=5,
@@ -446,7 +488,6 @@ class DataLoader:
                 for idx, row in df_zone_section.iterrows():
                     from_addr = str(row['FromAddressId']).strip()
                     to_addr = str(row['ToAddressId']).strip()
-                    section_id = str(row['SectionId']).strip()
                     
                     try:
                         from_ax = int(from_addr[1:4])
@@ -462,10 +503,6 @@ class DataLoader:
                             from_y = y_dict[from_key]
                             to_x = x_dict[to_key]
                             to_y = y_dict[to_key]
-                            
-                            # 計算路段的中點和寬度
-                            mid_x = (from_x + to_x) / 2
-                            mid_y = (from_y + to_y) / 2
                             
                             # 計算路段的 bounding box
                             xmin = min(from_x, to_x)
@@ -486,7 +523,7 @@ class DataLoader:
                             if height < 4:
                                 height = 4
                             
-                            # 繪製路段方框
+                            # 繪製路段小方框
                             zone_rect = Rectangle(
                                 (xmin, ymin), width, height,
                                 linewidth=3,

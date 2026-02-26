@@ -9,7 +9,7 @@ import logging
 import matplotlib.pyplot as plt
 from matplotlib.patches import Circle
 import io
-from PIL import Image
+from PIL import Image, ImageDraw
 
 plt.rcParams['font.sans-serif'] = ['Microsoft YaHei', 'Arial Unicode MS', 'DejaVu Sans', 'sans-serif']  # 嘗試多種可能的字型
 plt.rcParams['axes.unicode_minus'] = False
@@ -388,10 +388,6 @@ class PlotterBase:
         用於當高亮 ID 改變時，只更新方框圖層而不重新繪製整個底圖，提高性能。
         前提：必須已經執行過 execute() 方法，且 figure 仍然存在。
         """
-        if not hasattr(self, 'figure') or self.figure is None:
-            logging.warning("尚未執行 execute()，無法重新生成 overlay")
-            return False
-
         # 檢查是否有任何高亮需求
         has_highlights = (hasattr(self, "highlight_address_ids") and self.highlight_address_ids) or \
                         (hasattr(self, "highlight_section_ids") and self.highlight_section_ids)
@@ -403,17 +399,15 @@ class PlotterBase:
             return True
 
         try:
-            # 獲取原 figure 的主 ax
-            ax = self.figure.axes[0] if self.figure.axes else None
-            if ax is None:
-                logging.warning("找不到原 figure 的 axes")
+            # 獲取座標範圍
+            xlim = getattr(self, '_ax_xlim', None)
+            ylim = getattr(self, '_ax_ylim', None)
+            
+            if xlim is None or ylim is None:
+                logging.warning("沒有座標範圍資訊，無法生成 overlay")
                 return False
-
-            # 使用固定座標範圍（與底圖一致）
-            xlim = getattr(self, '_ax_xlim', ax.get_xlim())
-            ylim = getattr(self, '_ax_ylim', ax.get_ylim())
-
-            # 創建新的透明 figure（只用於繪製方框，與底圖同尺寸）
+            
+            # 創建新的透明 figure（與底圖同尺寸）
             overlay_fig, overlay_ax = plt.subplots(figsize=(_CANVAS_W, _CANVAS_H))
             overlay_fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
             overlay_ax.set_xlim(xlim)
@@ -425,23 +419,21 @@ class PlotterBase:
             for spine in overlay_ax.spines.values():
                 spine.set_visible(False)
 
-            # 只在 overlay_ax 上繪製高亮方框
-            self._draw_highlights_on_ax(overlay_ax, overlay_ax)
+            # 繪製高亮方框
+            self._draw_highlights_on_ax(overlay_ax)
 
             # 保存透明圖層
             buf = io.BytesIO()
             overlay_fig.savefig(buf, format='png', pad_inches=0,
-                               facecolor='none', transparent=True)
+                           facecolor='none', transparent=True)
             buf.seek(0)
             self.overlay_image = Image.open(buf).convert("RGBA").copy()
             buf.close()
 
             # 關閉 overlay figure 釋放記憶體
             plt.close(overlay_fig)
-
+            
             # 儲存座標軸範圍與點擊偵測區域（data 座標）
-            self._ax_xlim = xlim
-            self._ax_ylim = ylim
             self.highlight_hit_areas = self._compute_highlight_hit_areas()
 
             logging.info("成功重新生成 overlay 圖層")
@@ -451,6 +443,53 @@ class PlotterBase:
             logging.error(f"重新生成 overlay 圖層失敗: {e}")
             self.overlay_image = None
             return False
+
+    def _data_to_pixel(self, data_x, data_y, W, H, xlim, ylim):
+        """將資料座標轉換為像素座標
+        
+        Args:
+            data_x: 資料 X 座標
+            data_y: 資料 Y 座標
+            W: 圖片寬度（像素）
+            H: 圖片高度（像素）
+            xlim: X 座標範圍 (min, max)
+            ylim: Y 座標範圍 (min, max)
+            
+        Returns:
+            tuple: (pixel_x, pixel_y) 像素座標
+        """
+        # X: 資料座標原點在左，圖片原點在左上
+        px = (data_x - xlim[0]) / (xlim[1] - xlim[0]) * W
+        # Y: 資料座標原點在下，圖片原點在上（需要翻轉）
+        py = H - (data_y - ylim[0]) / (ylim[1] - ylim[0]) * H
+        return int(px), int(py)
+    
+    def _data_to_pixel_box(self, x1, y1, x2, y2, W, H, xlim, ylim):
+        """將資料座標的邊界框轉換為像素座標（確保順序正確）
+        
+        Args:
+            x1, y1: 第一個點的資料座標
+            x2, y2: 第二個點的資料座標
+            W: 圖片寬度（像素）
+            H: 圖片高度（像素）
+            xlim: X 座標範圍 (min, max)
+            ylim: Y 座標範圍 (min, max)
+            
+        Returns:
+            tuple: (px1, py1, px2, py2) 像素座標（確保 px2>=px1, py2>=py1）
+        """
+        px1 = int((x1 - xlim[0]) / (xlim[1] - xlim[0]) * W)
+        px2 = int((x2 - xlim[0]) / (xlim[1] - xlim[0]) * W)
+        py1 = int(H - (y1 - ylim[0]) / (ylim[1] - ylim[0]) * H)
+        py2 = int(H - (y2 - ylim[0]) / (ylim[1] - ylim[0]) * H)
+        
+        # 確保座標順序正確（rectangle 需要 x2>=x1, y2>=y1）
+        if px1 > px2:
+            px1, px2 = px2, px1
+        if py1 > py2:
+            py1, py2 = py2, py1
+            
+        return px1, py1, px2, py2
 
     def _compute_highlight_hit_areas(self):
         """計算當前高亮方框的點擊偵測區域，回傳 data 座標的 list。"""
