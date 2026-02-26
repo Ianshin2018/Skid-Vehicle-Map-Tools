@@ -122,18 +122,18 @@ class ImageProcessor:
             except Exception:
                 pass
         
-        # 50ms 防抖延遲
-        self.ui._magnifier_after_id = self.ui.root.after(50, lambda: self._update_magnifier(event))
+        # 5ms 合併同幀事件，減少重複運算
+        self.ui._magnifier_after_id = self.ui.root.after(5, lambda: self._update_magnifier(event))
 
     def _update_magnifier(self, event):
-        """更新放大鏡顯示（50ms 防抖延遲後執行）"""
+        """更新放大鏡顯示"""
         try:
             # 位置快取機制：滑鼠移動 <10 像素時跳過更新
             last_pos = getattr(self.ui, '_magnifier_last_pos', None)
             if last_pos is not None:
                 dx = event.x - last_pos[0]
                 dy = event.y - last_pos[1]
-                if abs(dx) < 10 and abs(dy) < 10:
+                if abs(dx) < 5 and abs(dy) < 5:
                     return
             
             # 更新位置快取
@@ -148,18 +148,19 @@ class ImageProcessor:
             if orig_img is None:
                 return
             
-            # 計算在原始圖片上的座標
+            # 計算在原始圖片上的座標（扣除全圖模式置中偏移）
             scale = getattr(self.ui, '_image_scale', 0.2)
             img_w, img_h = orig_img.size
-            img_px_x = canvas_x / scale
-            img_px_y = canvas_y / scale
+            off_x, off_y = getattr(self.ui, '_img_canvas_offset', (0, 0))
+            img_px_x = (canvas_x - off_x) / scale
+            img_px_y = (canvas_y - off_y) / scale
             
             # 放大鏡參數
-            magnifier_size = 160  # 160x160 像素
-            magnifier_zoom = 8    # 8 倍放大
-            
+            magnifier_size = 120  # 顯示框 120x120 像素
+            magnifier_zoom = 0.2    # 3 倍放大（從原圖截 40x40 → 顯示 120x120）
+
             # 計算要擷取的區域（以滑鼠位置為中心）
-            half_size = (magnifier_size // 2) // magnifier_zoom
+            half_size = magnifier_size // 2 // magnifier_zoom
             left = max(0, int(img_px_x) - half_size)
             top = max(0, int(img_px_y) - half_size)
             right = min(img_w, int(img_px_x) + half_size)
@@ -171,8 +172,8 @@ class ImageProcessor:
             # 擷取區域影像
             cropped = orig_img.crop((left, top, right, bottom))
             
-            # 放大並顯示
-            magnified = cropped.resize((magnifier_size, magnifier_size), Image.LANCZOS)
+            # 放大並顯示（BILINEAR 比 LANCZOS 快數倍，在小方框內視覺差異極小）
+            magnified = cropped.resize((magnifier_size, magnifier_size), Image.BILINEAR)
             self.ui._magnifier_tk_img = ImageTk.PhotoImage(magnified)
             
             # 繪製到放大鏡 canvas
@@ -216,27 +217,46 @@ class ImageProcessor:
         self.ui.output_canvas.scan_dragto(event.x, event.y, gain=1)
 
     def _on_canvas_resize(self, event):
-        """畫布大小變化時，將放大縮小按鈕固定在右上角"""
+        """畫布大小變化時，重新定位右上角按鈕、放大鏡 checkbox 與放大鏡方框"""
         btn_y = 10
         btn_margin = 10
         btn_spacing = 5
-        btn_w_sm = self.ui.zoom_in_btn.winfo_reqwidth()      # +/- 按鈕寬度
-        btn_w_full = self.ui.zoom_full_btn.winfo_reqwidth()   # 全圖 按鈕寬度
-        canvas_w = event.width
-        # 右→左排列：[zoom_out] [zoom_in] [zoom_full]
+        btn_w_sm   = self.ui.zoom_in_btn.winfo_reqwidth()
+        btn_h_sm   = self.ui.zoom_in_btn.winfo_reqheight()
+        btn_w_full = self.ui.zoom_full_btn.winfo_reqwidth()
+        chk_w      = self.ui._magnifier_check.winfo_reqwidth()
+        canvas_w   = event.width
+        canvas_h   = event.height
+
+        # 第一排右→左：[zoom_out] [zoom_in] [全圖]
         self.ui.zoom_out_btn.place(in_=self.ui.output_canvas,
                                    x=canvas_w - btn_w_sm - btn_margin, y=btn_y)
         self.ui.zoom_in_btn.place(in_=self.ui.output_canvas,
                                   x=canvas_w - btn_w_sm*2 - btn_spacing - btn_margin, y=btn_y)
         self.ui.zoom_full_btn.place(in_=self.ui.output_canvas,
                                     x=canvas_w - btn_w_sm*2 - btn_w_full - btn_spacing*2 - btn_margin, y=btn_y)
+
+        # 第二排：放大鏡 checkbox 放在縮放按鈕正下方靠右對齊
+        chk_y = btn_y + btn_h_sm + btn_spacing
+        self.ui._magnifier_check.place(in_=self.ui.output_canvas,
+                                       x=canvas_w - chk_w - btn_margin,
+                                       y=chk_y)
+
         # 固定樓層按鈕在畫布左上角
         for idx, btn in enumerate(self.ui.floor_buttons.values()):
             btn.place(in_=self.ui.output_canvas, x=10, y=10+idx*35)
+
+        # 放大鏡方框固定在右下角（啟用時才移動，隱藏時不動）
+        if getattr(self.ui, '_magnifier_enabled', False):
+            mag_size   = 120
+            mag_margin = 10
+            self.ui.magnifier_canvas.place(in_=self.ui.output_canvas,
+                                           x=canvas_w - mag_size - mag_margin,
+                                           y=canvas_h - mag_size - mag_margin)
+
         # 全圖模式下視窗縮放時重新計算 fit 比例
         if getattr(self.ui, '_fullmap_mode', False) and getattr(self.ui, '_original_pil_img', None):
             img_w, img_h = self.ui._original_pil_img.size
-            canvas_h = self.ui.output_canvas.winfo_height()
             if event.width > 1 and canvas_h > 1:
                 self.ui._image_scale = min(event.width / img_w, canvas_h / img_h)
                 self._draw_scaled_image()

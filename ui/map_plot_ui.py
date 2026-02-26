@@ -312,11 +312,11 @@ class MapPlotUI:
             command=self._toggle_magnifier
         )
         
-        # 放大鏡顯示區域 (160x160)
+        # 放大鏡顯示區域 (120x120)
         self.magnifier_canvas = tk.Canvas(
             self.canvas_frame,
-            width=160,
-            height=160,
+            width=120,
+            height=120,
             bg="gray",
             highlightthickness=1,
             highlightbackground="black"
@@ -411,6 +411,10 @@ class MapPlotUI:
         self.zoom_in_btn.place(in_=self.output_canvas, x=canvas_w-50, y=10)
         self.zoom_out_btn.place(in_=self.output_canvas, x=canvas_w-25, y=10)
         self.zoom_full_btn.place(in_=self.output_canvas, x=canvas_w-85, y=10)
+        # 放大鏡 checkbox 放第二排，縮放按鈕正下方靠右對齊
+        chk_w = self._magnifier_check.winfo_reqwidth()
+        btn_h = self.zoom_in_btn.winfo_reqheight()
+        self._magnifier_check.place(in_=self.output_canvas, x=canvas_w - chk_w - 10, y=10 + btn_h + 5)
 
     # === 代理方法：讓原有程式碼向後相容 ===
     
@@ -437,12 +441,19 @@ class MapPlotUI:
         return self._image_processor.zoom_full()
     
     def _toggle_magnifier(self):
-        """切換放大鏡功能"""
+        """切換放大鏡功能：啟用時顯示右下角方框，停用時隱藏"""
         self._magnifier_enabled = self._magnifier_var.get() == 1
-        if not self._magnifier_enabled:
-            # 清除放大鏡顯示
-            if hasattr(self, 'magnifier_canvas'):
-                self.magnifier_canvas.delete("all")
+        if self._magnifier_enabled:
+            canvas_w   = self.output_canvas.winfo_width()
+            canvas_h   = self.output_canvas.winfo_height()
+            mag_size   = 120
+            mag_margin = 10
+            self.magnifier_canvas.place(in_=self.output_canvas,
+                                        x=canvas_w - mag_size - mag_margin,
+                                        y=canvas_h - mag_size - mag_margin)
+        else:
+            self.magnifier_canvas.delete("all")
+            self.magnifier_canvas.place_forget()
     
     def _export_canvas_image(self):
         return self._image_processor.export_canvas_image()
