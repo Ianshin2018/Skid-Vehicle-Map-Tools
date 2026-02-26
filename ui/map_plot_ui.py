@@ -135,15 +135,15 @@ class MapPlotUI:
         menubar.add_cascade(label="顯示", menu=display_menu)
         
         # 施工區域
-        self._menu_show_zone_var = tk.IntVar(value=1)
+        self._menu_show_zone_var = tk.IntVar(value=0)
         display_menu.add_checkbutton(
             label="施工區域",
             variable=self._menu_show_zone_var,
             command=self._on_menu_zone_toggled
         )
-        
+
         # 打滑位置
-        self._menu_show_highlight_var = tk.IntVar(value=1)
+        self._menu_show_highlight_var = tk.IntVar(value=0)
         display_menu.add_checkbutton(
             label="打滑位置",
             variable=self._menu_show_highlight_var,
@@ -343,6 +343,28 @@ class MapPlotUI:
             command=self._toggle_magnifier,
         )
         self._magnifier_check.pack(side=tk.LEFT, padx=5)
+
+        ttk.Separator(self._map_options_frame, orient=tk.VERTICAL).pack(
+            side=tk.LEFT, fill=tk.Y, padx=10, pady=3
+        )
+
+        self._show_zone_var = tk.IntVar(value=0)
+        self._show_zone_check = ttk.Checkbutton(
+            self._map_options_frame,
+            text="施工區域",
+            variable=self._show_zone_var,
+            command=self._toggle_layers,
+        )
+        self._show_zone_check.pack(side=tk.LEFT, padx=5)
+
+        self._show_highlight_var = tk.IntVar(value=0)
+        self._show_highlight_check = ttk.Checkbutton(
+            self._map_options_frame,
+            text="打滑位置",
+            variable=self._show_highlight_var,
+            command=self._toggle_layers,
+        )
+        self._show_highlight_check.pack(side=tk.LEFT, padx=5)
         
         # 放大鏡顯示區域 (120x120)
         self.magnifier_canvas = tk.Canvas(
@@ -363,7 +385,6 @@ class MapPlotUI:
         self.output_canvas.bind("<Configure>", self._image_processor._on_canvas_resize)
         self.output_canvas.bind("<ButtonPress-1>", self._image_processor._start_move)
         self.output_canvas.bind("<B1-Motion>", self._image_processor._move_canvas)
-        self.output_canvas.bind("<Double-Button-1>", lambda *_: self._zoom_full())
         self.output_canvas.bind("<ButtonRelease-3>", self._image_processor._on_canvas_right_click)
         self.output_canvas.bind("<MouseWheel>", self._image_processor._on_mousewheel)
         self.output_canvas.bind("<Button-4>", self._image_processor._on_mousewheel)
@@ -686,17 +707,6 @@ class MapPlotUI:
             else:
                 self._combined_pil_img = self._base_pil_img
 
-            # 建立圖層切換
-            if not hasattr(self, "_show_highlight_var"):
-                self._show_highlight_var = tk.IntVar(value=1)
-                self._show_highlight_check = tk.Checkbutton(
-                    self.canvas_frame,
-                    text="顯示打滑位置",
-                    variable=self._show_highlight_var,
-                    command=self._toggle_vehicle_highlight
-                )
-                self._show_highlight_check.grid(row=2, column=0, sticky="w", pady=5, padx=5)
-
             if self._show_highlight_var.get() == 1 and self._combined_pil_img:
                 self.show_image_on_canvas(self._combined_pil_img)
             elif self._base_pil_img:
@@ -756,16 +766,6 @@ class MapPlotUI:
             else:
                 self._cargo_combined_pil_img = self._cargo_base_pil_img
 
-            if not hasattr(self, "_cargo_show_highlight_var"):
-                self._cargo_show_highlight_var = tk.IntVar(value=1)
-                self._cargo_show_highlight_check = tk.Checkbutton(
-                    self.canvas_frame,
-                    text="顯示打滑位置",
-                    variable=self._cargo_show_highlight_var,
-                    command=self._toggle_cargo_highlight
-                )
-                self._cargo_show_highlight_check.grid(row=2, column=0, sticky="w", pady=5, padx=5)
-
             if self._cargo_combined_pil_img:
                 self.show_image_on_canvas(self._cargo_combined_pil_img)
             elif self._cargo_base_pil_img:
@@ -782,7 +782,7 @@ class MapPlotUI:
 
     def _toggle_cargo_highlight(self):
         """切換貨物地圖的打滑位置顯示"""
-        if self._cargo_show_highlight_var.get() == 1:
+        if self._show_highlight_var.get() == 1:
             if hasattr(self, '_cargo_combined_pil_img') and self._cargo_combined_pil_img:
                 self.show_image_on_canvas(self._cargo_combined_pil_img)
         else:
@@ -790,26 +790,8 @@ class MapPlotUI:
                 self.show_image_on_canvas(self._cargo_base_pil_img)
 
     def _create_layer_checkbuttons(self):
-        """建立圖層切換 checkbutton"""
-        if not hasattr(self, "_show_zone_check"):
-            self._show_zone_var = tk.IntVar(value=1)
-            self._show_zone_check = tk.Checkbutton(
-                self.canvas_frame,
-                text="顯示施工區域",
-                variable=self._show_zone_var,
-                command=self._toggle_layers
-            )
-            self._show_zone_check.grid(row=2, column=0, sticky="w", pady=5, padx=5)
-
-        if not hasattr(self, "_show_highlight_check"):
-            self._show_highlight_var = tk.IntVar(value=1)
-            self._show_highlight_check = tk.Checkbutton(
-                self.canvas_frame,
-                text="顯示打滑位置",
-                variable=self._show_highlight_var,
-                command=self._toggle_layers
-            )
-            self._show_highlight_check.grid(row=3, column=0, sticky="w", pady=5, padx=5)
+        """圖層切換 checkbutton 已於 _create_widgets() 中建立，此方法保留相容性。"""
+        pass
 
     def load_fixed_folder(self, folder_path):
         """讀取指定資料夾"""
@@ -917,19 +899,9 @@ class MapPlotUI:
             for var in self.date_checkboxes.values():
                 var.set(0)
 
-            # 顯示底圖 + 施工區域
+            # 顯示底圖（依 checkbox 狀態決定是否疊加施工區域 / 打滑位置）
             if self._base_pil_img:
-                self._create_layer_checkbuttons()
-                
-                if self._zone_pil_img:
-                    result_img = self._base_pil_img.copy()
-                    zone_img = self._zone_pil_img
-                    if zone_img.size != result_img.size:
-                        zone_img = zone_img.resize(result_img.size, Image.LANCZOS)
-                    result_img = Image.alpha_composite(result_img, zone_img)
-                    self.show_image_on_canvas(result_img)
-                else:
-                    self.show_image_on_canvas(self._base_pil_img)
+                self._toggle_layers()
 
             self._update_status(f"就緒 - {self._current_floor}")
             self._update_skid_ranking(self._current_floor, selected_dates=[])
