@@ -65,7 +65,7 @@ class SkidHandler:
         """顯示打滑門檻滑桿"""
         if hasattr(self.ui, '_skid_slider_frame') and not self.ui._skid_slider_frame.winfo_ismapped():
             self.ui._skid_slider_frame.pack(fill=tk.X, padx=5, pady=(0, 2),
-                                         before=self.ui.canvas_frame)
+                                         before=self.ui._map_options_frame)
 
     def slider_pos_to_threshold(self, pos):
         """將滑桿位置 (0-100) 轉換為重複次數門檻。

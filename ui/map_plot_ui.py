@@ -114,11 +114,11 @@ class MapPlotUI:
     def _setup_window(self):
         """設定視窗屬性"""
         self.root.minsize(300, 200)
-        self.root.title("打滑數據顯示工具-V1.0.3")
+        self.root.title("打滑數據顯示工具-V1.0.4")
         self._create_menu_bar()
 
     def _create_menu_bar(self):
-        """建立功能表列（檔案、顯示選單）"""
+        """建立功能表列（檔案、顯示、說明選單）"""
         menubar = tk.Menu(self.root)
         self.root.config(menu=menubar)
 
@@ -149,6 +149,12 @@ class MapPlotUI:
             command=self._on_menu_highlight_toggled
         )
 
+        # 說明選單
+        help_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="說明", menu=help_menu)
+        help_menu.add_command(label="使用說明書", command=self._show_readme)
+        help_menu.add_command(label="程式版本號", command=self._show_version)
+
     def _on_menu_zone_toggled(self):
         """功能表顯示施工區域切換"""
         if hasattr(self, '_show_zone_var'):
@@ -171,6 +177,20 @@ class MapPlotUI:
             self._menu_show_zone_var.set(self._show_zone_var.get())
         if hasattr(self, '_show_highlight_var'):
             self._menu_show_highlight_var.set(self._show_highlight_var.get())
+
+    def _show_readme(self):
+        """開啟使用說明書"""
+        readme_path = os.path.join(self._project_root, "README.md")
+        if os.path.exists(readme_path):
+            import webbrowser
+            webbrowser.open(f"file://{readme_path}")
+        else:
+            messagebox.showerror("錯誤", "找不到說明檔案：README.md")
+
+    def _show_version(self):
+        """顯示程式版本號"""
+        version_info = "打滑數據顯示工具\n\n版本：V1.0.3\n\n功能說明：\n- 顯示樓層地圖\n- 施工區域顯示\n- 打滑位置標示\n- 資料篩選與分析"
+        messagebox.showinfo("程式版本號", version_info)
 
     def _setup_logging(self):
         """設定日誌"""
@@ -298,19 +318,30 @@ class MapPlotUI:
         self.canvas_h_scrollbar = ttk.Scrollbar(self.canvas_frame, orient=tk.HORIZONTAL, command=self.output_canvas.xview)
         self.output_canvas.config(xscrollcommand=self.canvas_h_scrollbar.set)
 
-        # 縮放按鈕
+        # 縮放按鈕（只保留 + / -，全圖改為下方 checkbox）
         self.zoom_in_btn = tk.Button(self.canvas_frame, text="+", width=2, command=self._zoom_in)
         self.zoom_out_btn = tk.Button(self.canvas_frame, text="-", width=2, command=self._zoom_out)
-        self.zoom_full_btn = tk.Button(self.canvas_frame, text="全圖", width=3, command=self._zoom_full)
 
-        # 放大鏡 checkbox 和顯示區域
+        # 地圖選項列：全圖 checkbox + 放大鏡 checkbox（置於滑桿與畫布之間）
+        self._map_options_frame = ttk.Frame(self.status_frame)
+
+        self._fullmap_var = tk.IntVar(value=0)
+        self._fullmap_check = ttk.Checkbutton(
+            self._map_options_frame,
+            text="全圖",
+            variable=self._fullmap_var,
+            command=self._zoom_full,
+        )
+        self._fullmap_check.pack(side=tk.LEFT, padx=(5, 15))
+
         self._magnifier_var = tk.IntVar(value=0)
-        self._magnifier_check = tk.Checkbutton(
-            self.canvas_frame,
+        self._magnifier_check = ttk.Checkbutton(
+            self._map_options_frame,
             text="放大鏡",
             variable=self._magnifier_var,
-            command=self._toggle_magnifier
+            command=self._toggle_magnifier,
         )
+        self._magnifier_check.pack(side=tk.LEFT, padx=5)
         
         # 放大鏡顯示區域 (120x120)
         self.magnifier_canvas = tk.Canvas(
@@ -331,6 +362,7 @@ class MapPlotUI:
         self.output_canvas.bind("<Configure>", self._image_processor._on_canvas_resize)
         self.output_canvas.bind("<ButtonPress-1>", self._image_processor._start_move)
         self.output_canvas.bind("<B1-Motion>", self._image_processor._move_canvas)
+        self.output_canvas.bind("<Double-Button-1>", lambda *_: self._zoom_full())
         self.output_canvas.bind("<ButtonRelease-3>", self._image_processor._on_canvas_right_click)
         self.output_canvas.bind("<MouseWheel>", self._image_processor._on_mousewheel)
         self.output_canvas.bind("<Button-4>", self._image_processor._on_mousewheel)
@@ -406,15 +438,13 @@ class MapPlotUI:
         self.canvas_frame.rowconfigure(0, weight=1)
         self.canvas_frame.columnconfigure(0, weight=1)
 
+        # 地圖選項列（全圖 + 放大鏡 checkbox）置於 canvas_frame 之前
+        self._map_options_frame.pack(fill=tk.X, padx=5, pady=(0, 2), before=self.canvas_frame)
+
         self.output_canvas.update()
         canvas_w = self.output_canvas.winfo_width()
         self.zoom_in_btn.place(in_=self.output_canvas, x=canvas_w-50, y=10)
         self.zoom_out_btn.place(in_=self.output_canvas, x=canvas_w-25, y=10)
-        self.zoom_full_btn.place(in_=self.output_canvas, x=canvas_w-85, y=10)
-        # 放大鏡 checkbox 放第二排，縮放按鈕正下方靠右對齊
-        chk_w = self._magnifier_check.winfo_reqwidth()
-        btn_h = self.zoom_in_btn.winfo_reqheight()
-        self._magnifier_check.place(in_=self.output_canvas, x=canvas_w - chk_w - 10, y=10 + btn_h + 5)
 
     # === 代理方法：讓原有程式碼向後相容 ===
     

@@ -45,7 +45,9 @@ class ImageProcessor:
         scale = self.ui._image_scale
         new_w = int(img_w * scale)
         new_h = int(img_h * scale)
-        resized_img = self.ui._original_pil_img.resize((new_w, new_h), Image.LANCZOS)
+        # 縮小時用 BILINEAR（速度快，顯示品質足夠）；放大時用 LANCZOS（品質較好）
+        resample = Image.BILINEAR if scale < 1.0 else Image.LANCZOS
+        resized_img = self.ui._original_pil_img.resize((new_w, new_h), resample)
         self.ui._tk_img = ImageTk.PhotoImage(resized_img)
         self.ui.output_canvas.delete("all")
 
@@ -80,22 +82,58 @@ class ImageProcessor:
             if getattr(self.ui, "_canvas_first_show", True):
                 self.ui._canvas_first_show = False
 
+    def _sync_fullmap_var(self, value: int):
+        """同步全圖 checkbox 狀態（0=取消，1=勾選）"""
+        fv = getattr(self.ui, '_fullmap_var', None)
+        if fv is not None:
+            fv.set(value)
+
     def zoom_in(self):
         """放大影像（退出全圖模式）"""
         self.ui._fullmap_mode = False
+        self.ui._pre_fullmap_state = None
+        self._sync_fullmap_var(0)
         self.ui._image_scale = min(self.ui._image_scale * 1.2, 5.0)
         self._draw_scaled_image()
 
     def zoom_out(self):
         """縮小影像（退出全圖模式）"""
         self.ui._fullmap_mode = False
+        self.ui._pre_fullmap_state = None
+        self._sync_fullmap_var(0)
         self.ui._image_scale = max(self.ui._image_scale / 1.2, 0.01)
         self._draw_scaled_image()
 
     def zoom_full(self):
-        """全圖模式：計算 fit-to-canvas 縮放比例，整張地圖置中顯示"""
+        """全圖模式切換：第一次進入全圖，第二次還原之前的縮放與捲動位置"""
         if not hasattr(self.ui, '_original_pil_img') or self.ui._original_pil_img is None:
+            self._sync_fullmap_var(0)
             return
+
+        # 若已在全圖模式，還原先前狀態
+        if getattr(self.ui, '_fullmap_mode', False):
+            saved = getattr(self.ui, '_pre_fullmap_state', None)
+            self.ui._fullmap_mode = False
+            self._sync_fullmap_var(0)
+            if saved:
+                self.ui._image_scale = saved['scale']
+                self._draw_scaled_image()
+                self.ui.output_canvas.update_idletasks()
+                self.ui.output_canvas.xview_moveto(saved['xview'])
+                self.ui.output_canvas.yview_moveto(saved['yview'])
+            else:
+                self._draw_scaled_image()
+            return
+
+        # 儲存目前縮放比例與捲動位置
+        xview = self.ui.output_canvas.xview()[0]
+        yview = self.ui.output_canvas.yview()[0]
+        self.ui._pre_fullmap_state = {
+            'scale': self.ui._image_scale,
+            'xview': xview,
+            'yview': yview,
+        }
+
         canvas_w = self.ui.output_canvas.winfo_width()
         canvas_h = self.ui.output_canvas.winfo_height()
         if canvas_w <= 1 or canvas_h <= 1:
@@ -105,6 +143,7 @@ class ImageProcessor:
         img_w, img_h = self.ui._original_pil_img.size
         self.ui._image_scale = min(canvas_w / img_w, canvas_h / img_h)
         self.ui._fullmap_mode = True
+        self._sync_fullmap_var(1)
         self._draw_scaled_image()
 
     def _on_canvas_mouse_move(self, event):
@@ -174,8 +213,25 @@ class ImageProcessor:
             
             # 放大並顯示（BILINEAR 比 LANCZOS 快數倍，在小方框內視覺差異極小）
             magnified = cropped.resize((magnifier_size, magnifier_size), Image.BILINEAR)
+
+            # 在放大影像上疊繪車輛位置綠框
+            img_boxes = getattr(self.ui, '_vehicle_highlight_img_boxes', [])
+            if img_boxes:
+                crop_w = right - left
+                crop_h = bottom - top
+                zoom_x = magnifier_size / crop_w if crop_w > 0 else 1
+                zoom_y = magnifier_size / crop_h if crop_h > 0 else 1
+                mag_draw = ImageDraw.Draw(magnified)
+                for (bx1, by1, bx2, by2) in img_boxes:
+                    mx1 = (bx1 - left) * zoom_x
+                    my1 = (by1 - top) * zoom_y
+                    mx2 = (bx2 - left) * zoom_x
+                    my2 = (by2 - top) * zoom_y
+                    if mx2 > 0 and my2 > 0 and mx1 < magnifier_size and my1 < magnifier_size:
+                        mag_draw.rectangle([mx1, my1, mx2, my2], outline='green', width=3)
+
             self.ui._magnifier_tk_img = ImageTk.PhotoImage(magnified)
-            
+
             # 繪製到放大鏡 canvas
             self.ui.magnifier_canvas.delete("all")
             self.ui.magnifier_canvas.create_image(0, 0, anchor="nw", image=self.ui._magnifier_tk_img)
@@ -217,30 +273,19 @@ class ImageProcessor:
         self.ui.output_canvas.scan_dragto(event.x, event.y, gain=1)
 
     def _on_canvas_resize(self, event):
-        """畫布大小變化時，重新定位右上角按鈕、放大鏡 checkbox 與放大鏡方框"""
+        """畫布大小變化時，重新定位右上角按鈕與放大鏡方框"""
         btn_y = 10
         btn_margin = 10
         btn_spacing = 5
-        btn_w_sm   = self.ui.zoom_in_btn.winfo_reqwidth()
-        btn_h_sm   = self.ui.zoom_in_btn.winfo_reqheight()
-        btn_w_full = self.ui.zoom_full_btn.winfo_reqwidth()
-        chk_w      = self.ui._magnifier_check.winfo_reqwidth()
-        canvas_w   = event.width
-        canvas_h   = event.height
+        btn_w_sm = self.ui.zoom_in_btn.winfo_reqwidth()
+        canvas_w  = event.width
+        canvas_h  = event.height
 
-        # 第一排右→左：[zoom_out] [zoom_in] [全圖]
+        # 右→左：[zoom_out] [zoom_in]
         self.ui.zoom_out_btn.place(in_=self.ui.output_canvas,
                                    x=canvas_w - btn_w_sm - btn_margin, y=btn_y)
         self.ui.zoom_in_btn.place(in_=self.ui.output_canvas,
                                   x=canvas_w - btn_w_sm*2 - btn_spacing - btn_margin, y=btn_y)
-        self.ui.zoom_full_btn.place(in_=self.ui.output_canvas,
-                                    x=canvas_w - btn_w_sm*2 - btn_w_full - btn_spacing*2 - btn_margin, y=btn_y)
-
-        # 第二排：放大鏡 checkbox 放在縮放按鈕正下方靠右對齊
-        chk_y = btn_y + btn_h_sm + btn_spacing
-        self.ui._magnifier_check.place(in_=self.ui.output_canvas,
-                                       x=canvas_w - chk_w - btn_margin,
-                                       y=chk_y)
 
         # 固定樓層按鈕在畫布左上角
         for idx, btn in enumerate(self.ui.floor_buttons.values()):
@@ -324,6 +369,8 @@ class ImageProcessor:
 
         # 滾輪縮放：退出全圖模式，設定新比例並重繪
         self.ui._fullmap_mode = False
+        self.ui._pre_fullmap_state = None
+        self._sync_fullmap_var(0)
         self.ui._image_scale = new_scale
         self._draw_scaled_image()
 
@@ -513,6 +560,7 @@ class ImageProcessor:
             canvas = self.ui.output_canvas
 
             items_created = []
+            img_boxes = []  # 圖片像素座標（供放大鏡使用，不受 scale/offset 影響）
             for area in hit_areas:
                 aid = str(area['id']).strip()
                 if area['type'] == 'address' and aid in addr_ids:
@@ -524,11 +572,19 @@ class ImageProcessor:
                 if not match:
                     continue
 
-                # 資料座標 → 畫布像素座標
-                cx1 = (area['xmin'] - xlim[0]) / (xlim[1] - xlim[0]) * img_w * scale
-                cx2 = (area['xmax'] - xlim[0]) / (xlim[1] - xlim[0]) * img_w * scale
-                cy1 = (ylim[1] - area['ymax']) / (ylim[1] - ylim[0]) * img_h * scale
-                cy2 = (ylim[1] - area['ymin']) / (ylim[1] - ylim[0]) * img_h * scale
+                # 資料座標 → 圖片像素座標（scale/offset 無關）
+                ipx1 = (area['xmin'] - xlim[0]) / (xlim[1] - xlim[0]) * img_w
+                ipx2 = (area['xmax'] - xlim[0]) / (xlim[1] - xlim[0]) * img_w
+                ipy1 = (ylim[1] - area['ymax']) / (ylim[1] - ylim[0]) * img_h
+                ipy2 = (ylim[1] - area['ymin']) / (ylim[1] - ylim[0]) * img_h
+                img_boxes.append((ipx1, ipy1, ipx2, ipy2))
+
+                # 圖片像素座標 → 畫布像素座標（加上全圖模式置中偏移）
+                off_x, off_y = getattr(self.ui, '_img_canvas_offset', (0, 0))
+                cx1 = ipx1 * scale + off_x
+                cx2 = ipx2 * scale + off_x
+                cy1 = ipy1 * scale + off_y
+                cy2 = ipy2 * scale + off_y
 
                 rect_id = canvas.create_rectangle(
                     cx1, cy1, cx2, cy2,
@@ -537,6 +593,7 @@ class ImageProcessor:
                 items_created.append(rect_id)
 
             self.ui._vehicle_highlight_items = items_created
+            self.ui._vehicle_highlight_img_boxes = img_boxes
 
             if items_created:
                 logging.info(f"車輛 {vehicle_number}: 高亮 {len(items_created)} 個打滑方框")
@@ -555,6 +612,7 @@ class ImageProcessor:
                 except Exception:
                     pass
             self.ui._vehicle_highlight_items = []
+            self.ui._vehicle_highlight_img_boxes = []
         except Exception as e:
             logging.error(f"清除高亮方框失敗: {e}")
 
