@@ -125,6 +125,7 @@ class MapPlotUI:
         # 檔案選單
         file_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="檔案", menu=file_menu)
+        file_menu.add_command(label="匯入資料集", command=self._import_dataset)
         file_menu.add_command(label="匯出圖片", command=self._export_canvas_image)
         file_menu.add_separator()
         file_menu.add_command(label="結束", command=self._on_closing)
@@ -539,7 +540,25 @@ class MapPlotUI:
     
     def _load_highlight_log(self, folder_path):
         return self._data_loader.load_highlight_log(folder_path)
-    
+
+    def _import_dataset(self):
+        """匯入資料集：開啟檔案對話框，驗證並合併至 highlights.csv"""
+        file_path = filedialog.askopenfilename(
+            title="選擇資料集檔案",
+            filetypes=[("CSV 檔案", "*.csv"), ("所有檔案", "*.*")]
+        )
+        if not file_path:
+            return
+        ok, msg, new_count = self._data_loader.import_highlight_dataset(file_path)
+        if ok:
+            messagebox.showinfo("匯入資料集", msg)
+            # 若有新增記錄且已載入樓層，刷新日期面板與打滑排名
+            if new_count > 0 and getattr(self, '_current_floor', None):
+                self._date_filter.populate_date_list()
+                self._skid_handler.regenerate_overlay()
+        else:
+            messagebox.showerror("匯入資料集", msg)
+
     def _load_zone_for_floor(self, folder_path):
         return self._data_loader.load_zone_for_floor(folder_path)
     

@@ -519,6 +519,191 @@ class DataLoader:
             logging.error(f"建立施工路段區域圖層失敗: {e}")
             return None
 
+    def _load_map_valid_ids(self):
+        """從各樓層的 Address.csv 與 Section.csv 載入所有有效 ID 集合。
+
+        Returns:
+            tuple: (valid_address_ids: set[str], valid_section_ids: set[str])
+        """
+        map_root = os.path.join(self.project_root, "Map")
+        floor_dirs = ["Garmin1F", "Garmin2F", "Garmin3F"]
+        valid_addr = set()
+        valid_sec = set()
+
+        for floor_dir in floor_dirs:
+            addr_path = os.path.join(map_root, floor_dir, "Address.csv")
+            sec_path = os.path.join(map_root, floor_dir, "Section.csv")
+
+            if os.path.isfile(addr_path):
+                try:
+                    df_a = pd.read_csv(addr_path, dtype=str)
+                    for col in df_a.columns:
+                        if col.strip().lower() == "addressid":
+                            valid_addr.update(df_a[col].astype(str).str.strip().tolist())
+                            break
+                except Exception as e:
+                    logging.warning(f"載入 {addr_path} 失敗: {e}")
+
+            if os.path.isfile(sec_path):
+                try:
+                    df_s = pd.read_csv(sec_path, dtype=str)
+                    for col in df_s.columns:
+                        if col.strip().lower() == "sectionid":
+                            valid_sec.update(df_s[col].astype(str).str.strip().tolist())
+                            break
+                except Exception as e:
+                    logging.warning(f"載入 {sec_path} 失敗: {e}")
+
+        logging.info(
+            f"地圖有效 ID 載入完成：{len(valid_addr)} 個 addressid，{len(valid_sec)} 個 sectionid"
+        )
+        return valid_addr, valid_sec
+
+    def import_highlight_dataset(self, file_path):
+        """匯入外部 highlights 資料集至現有資料中。
+
+        驗證流程：
+          1. 欄位檢查：必須包含 start_date, number, addressid, sectionid
+          2. 格式驗證：過濾 start_date 或 number 為空的無效列
+          3. 地圖驗證：比對各樓層 Address.csv / Section.csv，
+                       addressid 與 sectionid 均不符地圖資料者排除，不匯入
+          4. 重複比對：與現有 highlight_log_df 比對必要欄位，完全相同的列略過
+          5. 若有新記錄則合併並存回 highlights.csv，同時更新記憶體資料
+
+        Returns:
+            tuple: (ok: bool, message: str, new_count: int)
+        """
+        REQUIRED = ["start_date", "number", "addressid", "sectionid"]
+        _EMPTY = {"", "nan", "NaN", "None"}
+
+        def _is_valid_field(val):
+            return str(val).strip() not in _EMPTY
+
+        try:
+            df_new = pd.read_csv(file_path, dtype=str).fillna("")
+            df_new.columns = [c.strip().lower() for c in df_new.columns]
+
+            # 1. 欄位驗證
+            missing = [c for c in REQUIRED if c not in df_new.columns]
+            if missing:
+                return False, f"匯入失敗：缺少必要欄位 {missing}", 0
+
+            # 只保留必要欄並標準化
+            df_new = df_new[REQUIRED].astype(str).apply(lambda s: s.str.strip())
+            total_count = len(df_new)
+
+            # 2. 格式驗證：start_date 與 number 不可為空或 'nan'
+            fmt_mask = (
+                df_new['start_date'].apply(_is_valid_field) &
+                df_new['number'].apply(_is_valid_field)
+            )
+            df_valid = df_new[fmt_mask]
+            invalid_count = total_count - len(df_valid)
+
+            # 3. 地圖驗證：addressid 與 sectionid 均不符地圖資料 → 排除，不匯入
+            valid_addr_ids, valid_sec_ids = self._load_map_valid_ids()
+            geo_invalid_rows = []
+            df_importable = df_valid  # 預設全部可匯入
+            if valid_addr_ids or valid_sec_ids:
+                def _is_geo_invalid(row):
+                    addr = row['addressid']
+                    sec = row['sectionid']
+                    addr_ok = _is_valid_field(addr) and addr in valid_addr_ids
+                    sec_ok = _is_valid_field(sec) and sec in valid_sec_ids
+                    return not addr_ok and not sec_ok
+
+                geo_mask = df_valid.apply(_is_geo_invalid, axis=1)
+                geo_invalid_rows = df_valid[geo_mask][
+                    ['start_date', 'number', 'addressid', 'sectionid']
+                ].values.tolist()
+                df_importable = df_valid[~geo_mask]  # 排除地圖異常列
+            geo_invalid_count = len(geo_invalid_rows)
+
+            # 4. 與現有資料比對，找出真正新增的記錄（僅對通過地圖驗證的資料）
+            existing = getattr(self.ui, 'highlight_log_df', None)
+            if existing is None or existing.empty:
+                df_merged = df_importable
+                new_count = len(df_importable)
+                dup_count = 0
+            else:
+                existing_keys = set(
+                    zip(existing['start_date'], existing['number'],
+                        existing['addressid'], existing['sectionid'])
+                )
+                dup_mask = df_importable.apply(
+                    lambda r: (r['start_date'], r['number'], r['addressid'], r['sectionid'])
+                    not in existing_keys,
+                    axis=1
+                )
+                df_really_new = df_importable[dup_mask]
+                new_count = len(df_really_new)
+                dup_count = len(df_importable) - new_count
+
+                if new_count > 0:
+                    df_merged = pd.concat([existing, df_really_new], ignore_index=True)
+                else:
+                    msg = self._build_import_msg(
+                        file_path, total_count, 0, dup_count, invalid_count,
+                        geo_invalid_count, geo_invalid_rows
+                    )
+                    return True, msg, 0
+
+            # 5. 存回 highlights.csv
+            csv_path = os.path.join(self.project_root, "highlights.csv")
+            df_merged.to_csv(csv_path, index=False)
+
+            # 6. 更新記憶體資料
+            self.ui.highlight_log_df = df_merged
+
+            msg = self._build_import_msg(
+                file_path, total_count, new_count, dup_count, invalid_count,
+                geo_invalid_count, geo_invalid_rows
+            )
+            logging.info(
+                f"匯入資料集：{file_path}，"
+                f"總計 {total_count}，新增 {new_count}，"
+                f"重複 {dup_count}，格式異常 {invalid_count}，地圖異常 {geo_invalid_count}"
+            )
+            return True, msg, new_count
+
+        except Exception as e:
+            logging.error(f"匯入資料集失敗: {e}")
+            return False, f"匯入失敗：{e}", 0
+
+    def _build_import_msg(self, file_path, total, new_count, dup_count,
+                          invalid_count, geo_invalid_count, geo_invalid_rows):
+        """組合匯入結果提示訊息"""
+        msg = (
+            f"匯入來源：{os.path.basename(file_path)}\n"
+            f"資料總筆數：{total} 筆\n"
+            f"成功匯入：{new_count} 筆\n"
+            f"重複略過：{dup_count} 筆\n"
+            f"格式異常：{invalid_count} 筆\n"
+            f"地圖不符：{geo_invalid_count} 筆"
+        )
+        remarks = []
+        if invalid_count > 0:
+            remarks.append(f"有 {invalid_count} 筆缺少 start_date 或 number 欄位值")
+        if dup_count > 0 and new_count == 0:
+            remarks.append("所有有效記錄已存在，略過匯入")
+        if geo_invalid_count > 0:
+            remarks.append(
+                f"有 {geo_invalid_count} 筆的 addressid 與 sectionid "
+                f"均無法對應各樓層地圖資料，已排除（不匯入）"
+            )
+            # 顯示前 5 筆異常明細
+            preview = geo_invalid_rows[:5]
+            detail_lines = ["  異常明細（前5筆）："]
+            for row in preview:
+                detail_lines.append(
+                    f"  日期={row[0]}  車號={row[1]}  "
+                    f"addressid={row[2]}  sectionid={row[3]}"
+                )
+            remarks.append("\n".join(detail_lines))
+        if remarks:
+            msg += "\n\n備註：\n" + "\n".join(f"・{r}" for r in remarks)
+        return msg
+
     def calc_highlight_counts(self, selected_dates):
         """計算各 addressid 和 sectionid 在選定日期中的出現次數。
 
